@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `mist flux [types...]` prints Flux actions as Discord dispatches them: the named types, or every action. It stops after `-n` actions, or with `-f` at Ctrl+C, and then removes its listener from the page. A listener the CLI leaves behind, as when it is killed, removes itself 15 seconds after the CLI last read it. Payloads are masked like recorded values, so the tokens in actions such as `CONNECTION_OPEN` show as `"[secret]"`, and cut to short display bounds. `--full` cuts them at the bounds of recorded values.
+- `mist store <name>` lists a Flux store's methods and its `getState` keys. `mist store <name> <method> [args]` calls a method and prints the result, masked and cut like a `flux` payload. It calls only methods named as reads (`get`, `is`, `has`, `find`, `can`, `should`, `are`, `supports`), and not `getOr...` or `getAnd...` ones, which change state. A method named like a secret, such as `getToken`, has its result masked.
+- `mist inspect <selector>` prints an element and its ancestors up to `--depth`: size and position, the computed layout values that aren't the initial ones (`display`, `flex`, `justify-content`, `gap`, margins, padding, `overflow`, `white-space`, and more), the first children, and each CSS rule from `document.styleSheets` that matches and sets layout, with its declarations and source. `--all` prints every match.
+- `@aurologic/mist-api/testing` has test doubles for a plugin's unit tests, for any test runner: `fakeContext` (a plugin context typed as Evi's `PluginContext`, recording logs, styles, toasts, Flux subscriptions, and disposers), `fakeStore` (a Flux store with listeners and `change()`), `fakeDispatcher`, and `fakeEvi` (a module object for a module mock of `@evi/api`, with `findStore`, `getStore`, `waitFor`, `filters.byStoreName`, the dispatcher, React, and `addStore` to make a store arrive late). See `docs/testing.md`.
+
 ## 0.2.1
 
 - `subscribe` and `useStore` in `@aurologic/mist-api/stores` take a Flux store's name, such as `"PresenceStore"`. A store Discord hasn't made yet is listened to once it has, and the listener is called then. Evi starts plugins before Discord makes many of its stores, so `subscribe([stores.presence], redraw)` in `start` could listen to nothing after a cold start; `subscribe(["PresenceStore"], redraw)` can't. The docs' own example showed the first form and now shows the second.

@@ -9,6 +9,10 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { callOn, capability, CdpError, concerns, connect, type Connection, evaluate, releaseGroup } from "./cdp.ts";
+import { type FluxBatch, watchFlux } from "./flux.ts";
+import { inspect, inspectLines } from "./inspect.ts";
+import { DISPLAY, RECORDED } from "./page.ts";
+import { callStore, listStore, type StoreMethods } from "./store.ts";
 
 const USAGE = `mist <command> [options]
 
@@ -20,17 +24,23 @@ const USAGE = `mist <command> [options]
   call <id> <method> [args]   calls a native method; each arg is JSON, or a plain string
   patches [id]                Evi's patch and lookup diagnosis, problems first
   eval <expression>           evaluates in Discord's page and prints the result
+  flux [types...] [-f]        prints Flux actions as Discord dispatches them, all types without any
+  store <name> [method]       lists a Flux store's methods, or calls a reading one with args
+  inspect <selector>          an element's layout and its ancestors', with the CSS rules that set it
   restart                     restarts Discord with --remote-debugging-port
 
   --port <n>   debugging port (default 9222)
-  -n <count>   how many records (default 50)
+  -n <count>   how many records (default 50); flux: how many actions
   --json       prints raw JSON
+  --full       flux, store: values cut at mist's recorded-value bounds, not the shorter display ones
+  --depth <n>  inspect: how many ancestors (default 4)
+  --all        inspect: every match, not only the first
   --dry-run    restart: prints what it would run`;
 
-interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; }
+interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; full: boolean; depth: number; all: boolean; }
 
 function parse(argv: string[]): { positional: string[]; options: Options; } {
-    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false };
+    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false, full: false, depth: 4, all: false };
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -44,10 +54,14 @@ function parse(argv: string[]): { positional: string[]; options: Options; } {
         else if (arg === "--json") options.json = true;
         else if (arg === "-f" || arg === "--follow") options.follow = true;
         else if (arg === "--dry-run") options.dryRun = true;
+        else if (arg === "--full") options.full = true;
+        else if (arg === "--depth") options.depth = Number(value());
+        else if (arg === "--all") options.all = true;
         else positional.push(arg);
     }
     if (!Number.isInteger(options.port) || options.port < 1) throw new CdpError("--port must be a port number");
     if (!Number.isInteger(options.count) || options.count < 1) throw new CdpError("-n must be a positive number");
+    if (!Number.isInteger(options.depth) || options.depth < 0) throw new CdpError("--depth must be 0 or more");
     return { positional, options };
 }
 
@@ -146,6 +160,42 @@ async function follow(c: Connection, plugin: string, count: number) {
     }
 }
 
+function fluxLines({ records, dropped }: FluxBatch): string[] {
+    return [
+        ...dropped ? [`… ${dropped} actions dropped: the page keeps 1000 between reads`] : [],
+        ...records.map(r => `${time(r.at)} ${r.type} ${JSON.stringify(r.payload)}`),
+    ];
+}
+
+function storeLines({ store, methods, stateKeys }: StoreMethods): string[] {
+    const names = (readable: boolean) => methods.filter(m => m.readable === readable).map(m => m.name).join(" ") || "none";
+    return [
+        store,
+        `  reads: ${names(true)}`,
+        `  not called by mist: ${names(false)}`,
+        ...stateKeys ? [`  getState(): ${stateKeys.join(" ") || "no keys"}`] : [],
+    ];
+}
+
+async function flux(c: Connection, types: string[], options: Options) {
+    let interrupted = false;
+    const interrupt = () => {
+        if (interrupted) process.exit(130);
+        interrupted = true;
+    };
+    process.on("SIGINT", interrupt);
+    console.error(`Watching ${types.length ? types.join(", ") : "every action"}${options.follow ? " until Ctrl+C" : `, up to ${options.count}`}`);
+    try {
+        await watchFlux(c.send, { types, count: options.follow ? null : options.count, limits: options.full ? RECORDED : DISPLAY, stopped: () => interrupted }, batch => {
+            if (options.json) for (const r of batch.records) console.log(JSON.stringify(r));
+            else for (const line of fluxLines(batch)) console.log(line);
+            if (!batch.alive) console.error("The page ended the watch: it reloaded, or the CLI didn't read it for 15 seconds");
+        });
+    } finally {
+        process.off("SIGINT", interrupt);
+    }
+}
+
 function restart(port: number, dryRun: boolean) {
     const flag = `--remote-debugging-port=${port}`;
     if (process.platform !== "win32") {
@@ -235,11 +285,24 @@ async function main() {
                 if (!rest.length) throw new CdpError("mist eval needs an expression");
                 return print(await evaluate(c.send, rest.join(" ")), true);
             }
+            case "flux":
+                return await flux(c, rest, options);
+            case "store": {
+                const [store, method, ...args] = rest;
+                if (!store) throw new CdpError("mist store needs a store name, as in UserStore");
+                if (!method) return print(await listStore(c.send, store), options.json, storeLines);
+                return print((await callStore(c.send, store, method, args.map(argument), options.full ? RECORDED : DISPLAY)).result, true);
+            }
+            case "inspect": {
+                const selector = rest.join(" ");
+                if (!selector) throw new CdpError("mist inspect needs a CSS selector");
+                return print(await inspect(c.send, selector, options.depth, options.all), options.json, r => inspectLines(r, selector));
+            }
             default:
                 throw new CdpError(`Unknown command ${command}\n\n${USAGE}`);
         }
     } finally {
-        if (!options.follow) c.close();
+        c.close();
     }
 }
 

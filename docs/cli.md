@@ -46,6 +46,9 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | `call <id> <method> [args]` | Calls a native method. Each arg is JSON, or a plain string. |
 | `patches [id]` | Prints Evi's patch and lookup diagnosis, problems first. |
 | `eval <expression>` | Evaluates an expression in Discord's page and prints the result. |
+| `flux [types...] [-f]` | Prints Flux actions as Discord dispatches them: the named types, or every action. |
+| `store <Store> [method] [args]` | Lists a Flux store's methods, or calls one that reads and prints the result. |
+| `inspect <selector>` | Prints an element's layout and its ancestors', with the CSS rules that set it. |
 | `restart` | Restarts Discord with `--remote-debugging-port`. |
 
 ## Options
@@ -53,9 +56,12 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--port <n>` | `9222` | The debugging port. `restart` uses it for the flag it passes. |
-| `-n <count>` | `50` | How many records `logs`, `calls`, and `native-logs` print. |
-| `--json` | off | Prints raw JSON instead of lines. `values`, `call`, and `eval` always print JSON. |
-| `-f`, `--follow` | off | `logs` keeps printing new lines. |
+| `-n <count>` | `50` | How many records `logs`, `calls`, and `native-logs` print, and how many actions `flux` prints before it stops. |
+| `--json` | off | Prints raw JSON instead of lines. `values`, `call`, `eval`, and a `store` call always print JSON. `flux` prints one JSON object per line. |
+| `-f`, `--follow` | off | `logs` keeps printing new lines. `flux` keeps printing actions until Ctrl+C. |
+| `--full` | off | `flux` and `store` cut values at the bounds of recorded values instead of the shorter display bounds. |
+| `--depth <n>` | `4` | How many ancestors `inspect` prints. |
+| `--all` | off | `inspect` prints every match, not only the first. |
 | `--dry-run` | off | `restart` prints what it would run. |
 
 ## What the CLI sees
@@ -165,6 +171,83 @@ mist eval "Evi.plugins.get('weather-demo')"
 ```
 
 Evaluates the expression in Discord's page, awaits a promise result, and prints the result as JSON. The arguments after `eval` are joined with spaces.
+
+## flux
+
+```sh
+mist flux PRESENCE_UPDATES TYPING_START
+mist flux -n 20
+mist flux MESSAGE_CREATE -f
+```
+
+Prints each Flux action that Discord dispatches, one line per action as `<time> <type> <payload>`. The payload is the action without its `type`, as JSON. With types, `flux` subscribes to each one with `Dispatcher.subscribe`. Without types, it watches every action through an interceptor on Discord's dispatcher. The interceptor returns `false`, so Discord still handles each action.
+
+Without `-f`, `flux` stops after `-n` actions, 50 by default. With `-f`, it prints until you press Ctrl+C. A second Ctrl+C exits at once. Discord dispatches many actions each second, so watching every action with `-f` prints a lot.
+
+The listener lives in the page, and the CLI reads what it kept every 250 ms. The page keeps the newest 1000 actions between reads. When it drops older ones, `flux` prints `… <n> actions dropped`. When `flux` stops, it removes the listener. If the CLI ends without doing that, for example when it is killed, the page removes the listener 15 seconds after the last read. A page reload removes it too. In both cases a CLI that still runs prints `The page ended the watch`.
+
+Each payload is copied when the action is dispatched, with the masking that recorded values get: fields and `Map` keys named like secrets show as `"[secret]"`. Some actions, such as `CONNECTION_OPEN`, carry tokens and session ids, and those fields are masked. A bare string has no name, so it is never masked. Values are cut to the display bounds:
+
+| Bound | Display | `--full` |
+| --- | --- | --- |
+| String length | 200 | 2000 |
+| Array, `Set`, and `Map` items | 10 | 50 |
+| Object keys | 20 | 50 |
+| Depth | 4 | 6 |
+| Objects copied per value | 300 | 20000 |
+
+A cut string ends in `…(+<n> chars)`, a cut list in `"…(+<n> items)"`, and a cut object in a `"…"` key. A value past the depth shows as `"[too deep]"`. An object past the copy limit shows as `"…"`.
+
+If Discord's dispatcher has no interceptor list, `flux` without types fails and asks for action types.
+
+## store
+
+```sh
+mist store SelectedChannelStore
+mist store SelectedChannelStore getChannelId
+mist store ChannelStore getChannel '"1234567890123456789"'
+```
+
+With only a store name, `store` lists the store's methods, read from its class and the classes it extends, without the methods every Flux store has. The methods that `store` can call are under `reads`, and the others under `not called by mist`. When the store has a `getState` method, the keys of its state are listed too:
+
+```text
+SelectedChannelStore
+  reads: getChannelId getCurrentlySelectedChannelId getLastChannelFollowingDestination getLastSelectedChannelId getLastSelectedChannels getMostRecentSelectedTextChannelId getVoiceChannelId
+  not called by mist: initialize
+```
+
+With a method, `store` calls it and prints the result as JSON, masked and cut like a `flux` payload. `--full` uses the larger bounds. Each argument after the method name is parsed as JSON, or passed as the plain string when it isn't valid JSON, as in [call](#call). A Discord id is longer than a JavaScript number holds exactly, so pass it as a JSON string.
+
+`store` calls only methods named as reads: names that start with `get`, `is`, `has`, `find`, `can`, `should`, `are`, or `supports`, followed by a capital letter or nothing. It refuses names that go on with `Or` or `And`, such as `getOrCreatePendingEdit` and `getAndDeleteMostRecentUserCreatedThreadId`, which Discord's stores have and which change state. A refused method is never sent to the page. A name is not a guarantee: a Discord getter can still start a request or fill a cache the first time it runs.
+
+A store's values need no gate, because a CDP client can read the whole page anyway. [Security model](security.md#what-a-cdp-client-can-read-anyway) explains this. Masking still applies with `--full`.
+
+`store` fails with `No Flux store is named <name>` when `findStore` finds no store of that name, and with `<store> has no method <method>` when the store has no such method.
+
+## inspect
+
+```sh
+mist inspect '[class^="sidebar_"]'
+mist inspect 'nav[aria-label] > ul' --depth 2 --all
+```
+
+Prints the first element that matches the CSS selector, then each ancestor up to `--depth`. With `--all`, it prints each match. For each element, it prints:
+
+- The tag, id, and classes, the size, and the position in the viewport.
+- The computed layout values that differ from the initial value: `display`, `position`, `flex`, `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `align-self`, `gap`, `margin`, `padding`, `overflow`, `white-space`, `text-overflow`, `min-width`, `max-width`, `min-height`, `max-height`, `grid-template-columns`, `order`, `transform`, and the `top`, `right`, `bottom`, and `left` offsets. `display` is always printed.
+- The number of children, and the first five.
+- The `style` attribute, if any.
+- Each CSS rule in `document.styleSheets` that matches the element and sets a layout property, with its layout declarations and the file or `<style>` it comes from.
+
+```text
+element  span.item  96x18 at 8,8
+  display: block; flex: 1 1 0px; overflow: hidden; white-space: nowrap
+  children: 0
+  span (1 of 3 selectors) { margin: 0px; padding: 0px }  <style>
+  .row > .item { flex: 1 1 0px; white-space: nowrap }  app.css
+```
+
+Rules are listed in stylesheet order, so of two rules with the same specificity, the later one wins. A rule inside `@media` is listed only when its media query matches, and is prefixed with the query. A rule inside `@supports`, `@layer`, or `@container` is prefixed with its condition, which `inspect` doesn't check. For a selector list, only the selectors in it that match are printed, with how many the list has. Nested CSS rules aren't listed. A stylesheet from another origin can't be read, and `inspect` says how many it skipped.
 
 ## restart
 

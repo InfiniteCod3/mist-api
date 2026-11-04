@@ -4,7 +4,7 @@
  */
 import type { Reduced, Snapshot } from "./values.ts";
 
-export const MIST_VERSION = "0.2.0";
+export const MIST_VERSION = "0.2.1";
 
 /** Native methods every defineNative module has; the page client never lists them */
 export const HIDDEN = { debugAllowed: "__mist_debugAllowed", logs: "__mist_logs", events: "__mist_events" } as const;

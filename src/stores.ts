@@ -1,5 +1,5 @@
 /** `@aurologic/mist-api/stores`: Discord's Flux stores, typed only as far as plugins use them, and ways to follow their changes. */
-import { findStore, React } from "@evi/api";
+import { filters, findStore, React, waitFor } from "@evi/api";
 
 /** Anything that announces changes the way a Flux store does, such as a plugin's own emitter */
 export interface ChangeSource {
@@ -110,23 +110,47 @@ export function isStreamerMode(): boolean {
     return store?.enabled === true || store?.isEnabled?.() === true || store?.getState?.()?.enabled === true;
 }
 
-type Sources = ChangeSource | undefined | readonly (ChangeSource | undefined)[];
+/**
+ * A change source, or a Flux store's name as Discord gives it ("PresenceStore"). A name is listened
+ * to as soon as Discord makes the store, which can be after a plugin starts.
+ */
+export type Source = ChangeSource | string | undefined;
+export type Sources = Source | readonly Source[];
 
 function listOf(watched: Sources) {
-    const list: readonly (ChangeSource | undefined)[] = Array.isArray(watched) ? watched : [watched];
+    const list: readonly Source[] = Array.isArray(watched) ? watched : [watched];
     return list;
 }
 
 /**
  * Calls `listener` on every change of each source, for code outside React. Returns the unsubscribe,
- * which can go straight to `mist.ctx.onDispose`. A source that's undefined now isn't listened to later.
+ * which can go straight to `mist.ctx.onDispose`. A store named that Discord hasn't made yet is
+ * listened to once it has, and `listener` is called then, since the store may have changed before.
  */
 export function subscribe(watched: Sources, listener: () => void): () => void {
-    const list = listOf(watched).filter(source => source !== undefined);
     // Its own function, so the same listener subscribed twice unsubscribes once per subscription
     const changed = () => listener();
-    for (const source of list) source.addChangeListener(changed);
-    return () => { for (const source of list) source.removeChangeListener(changed); };
+    const undo: (() => void)[] = [];
+    const listen = (source: ChangeSource) => {
+        source.addChangeListener(changed);
+        undo.push(() => source.removeChangeListener(changed));
+    };
+    for (const source of listOf(watched)) {
+        if (typeof source !== "string") {
+            if (source) listen(source);
+            continue;
+        }
+        const store = lookUp<ChangeSource>(source);
+        if (store) {
+            listen(store);
+            continue;
+        }
+        undo.push(waitFor<ChangeSource>(filters.byStoreName(source), late => {
+            listen(late);
+            listener();
+        }));
+    }
+    return () => { for (const off of undo.splice(0)) off(); };
 }
 
 const same = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- `subscribe` and `useStore` in `@aurologic/mist-api/stores` take a Flux store's name, such as `"PresenceStore"`. A store Discord hasn't made yet is listened to once it has, and the listener is called then. Evi starts plugins before Discord makes many of its stores, so `subscribe([stores.presence], redraw)` in `start` could listen to nothing after a cold start; `subscribe(["PresenceStore"], redraw)` can't. The docs' own example showed the first form and now shows the second.
+
 ## 0.2.0
 
 The first release of mist-api, a TypeScript library for Evi plugins.

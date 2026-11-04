@@ -1,6 +1,6 @@
 {
     "name": "@aurologic/mist-api",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "A library for Evi plugins: typed native calls, native-to-page events, Flux store hooks, a cross-plugin bus, and debugging over CDP",
     "author": "Aurologic",
     "license": "GPL-3.0-or-later",

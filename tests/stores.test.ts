@@ -8,12 +8,32 @@ const found = new Map<string, unknown>();
 /** Evi's findStore throws while Discord's webpack isn't there yet */
 let webpackReady = true;
 const looked: string[] = [];
+/** Evi's waitFor: called back at once for a store that exists, else when arrive() makes it */
+const waiting = new Set<{ name: string; callback: (store: unknown) => void; }>();
+function arrive(name: string, store: unknown) {
+    found.set(name, store);
+    for (const waiter of [...waiting]) if (waiter.name === name) {
+        waiting.delete(waiter);
+        waiter.callback(store);
+    }
+}
 mock.module("@evi/api", () => ({
     React,
     findStore: (name: string) => {
         looked.push(name);
         if (!webpackReady) throw new Error("webpack isn't ready");
         return found.get(name);
+    },
+    filters: { byStoreName: (name: string) => ({ store: name }) },
+    waitFor: (filter: { store: string; }, callback: (store: unknown) => void) => {
+        const existing = found.get(filter.store);
+        if (existing) {
+            callback(existing);
+            return () => { };
+        }
+        const waiter = { name: filter.store, callback };
+        waiting.add(waiter);
+        return () => void waiting.delete(waiter);
     },
 }));
 const { currentUserId, isStreamerMode, stores, subscribe, useStore } = await import("../src/stores");
@@ -177,6 +197,60 @@ test("the same listener subscribed twice unsubscribes each subscription on its o
     first();
     store.change({});
     expect(heard).toBe(1);
+});
+
+test("a store named before Discord makes it is listened to once it exists, and the listener hears that it arrived", () => {
+    let heard = 0;
+    const unsubscribe = subscribe(["TLateStore"], () => heard++);
+    expect(heard).toBe(0);
+    const late = fakeStore({});
+    arrive("TLateStore", late);
+    expect(heard).toBe(1);
+    late.change({});
+    expect(heard).toBe(2);
+    unsubscribe();
+    late.change({});
+    expect(heard).toBe(2);
+    expect(late.listeners.size).toBe(0);
+});
+
+test("a store named that already exists is listened to at once, without an extra call", () => {
+    const store = fakeStore({});
+    arrive("TReadyStore", store);
+    let heard = 0;
+    const unsubscribe = subscribe("TReadyStore", () => heard++);
+    expect(heard).toBe(0);
+    store.change({});
+    expect(heard).toBe(1);
+    unsubscribe();
+    expect(store.listeners.size).toBe(0);
+});
+
+test("unsubscribing before a named store exists stops the wait", () => {
+    let heard = 0;
+    subscribe("TNeverStore", () => heard++)();
+    const store = fakeStore({});
+    arrive("TNeverStore", store);
+    store.change({});
+    expect(heard).toBe(0);
+    expect(store.listeners.size).toBe(0);
+});
+
+test("useStore re-renders when a store it names arrives", () => {
+    function Name() {
+        const name = useStore("TNamedStore", () => (found.get("TNamedStore") as { name?: string; } | undefined)?.name ?? "none");
+        return React.createElement("span", null, name);
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(Name)); });
+    expect(root.toJSON()).toMatchObject({ children: ["none"] });
+    const store = fakeStore({ name: "here" });
+    act(() => arrive("TNamedStore", store));
+    expect(root.toJSON()).toMatchObject({ children: ["here"] });
+    act(() => store.change({ name: "changed" }));
+    expect(root.toJSON()).toMatchObject({ children: ["changed"] });
+    act(() => root.unmount());
+    expect(store.listeners.size).toBe(0);
 });
 
 /** A plugin's own change source, not a Flux store */

@@ -3,7 +3,7 @@
 `@aurologic/mist-api/stores` types the Discord Flux stores that plugins use. It gives a React hook that re-renders when they change, and a listener for code outside React. It runs on the page side only, because it imports `findStore` and `React` from `@evi/api`.
 
 ```ts
-import { type ChangeSource, currentUserId, type FluxStore, isStreamerMode, stores, subscribe, useStore } from "@aurologic/mist-api/stores";
+import { type ChangeSource, currentUserId, type FluxStore, isStreamerMode, type Source, type Sources, stores, subscribe, useStore } from "@aurologic/mist-api/stores";
 ```
 
 The store interfaces are minimal. Each lists only the methods plugins call. A store method that isn't listed still exists at runtime, and a plugin can extend the interface to use it.
@@ -113,30 +113,37 @@ const body = isStreamerMode() ? t("hidden") : preview;
 ## subscribe
 
 ```ts
-function subscribe(watched: ChangeSource | undefined | readonly (ChangeSource | undefined)[], listener: () => void): () => void;
+type Source = ChangeSource | string | undefined;
+type Sources = Source | readonly Source[];
+
+function subscribe(watched: Sources, listener: () => void): () => void;
 ```
 
-Calls `listener` each time a source in `watched` emits a change, for code outside React. It returns the unsubscribe function, which removes every listener it added. Pass it to `mist.ctx.onDispose` so the listeners go when the plugin stops:
+Calls `listener` each time a source in `watched` emits a change, for code outside React. It returns the unsubscribe function, which removes every listener it added. Pass it to `mist.ctx.onDispose` so the listeners go when the plugin stops.
+
+In `start`, name Discord's stores instead of reading them from `stores`. Evi starts plugins as soon as Discord's React and dispatcher exist, which is often before Discord has made stores such as `PresenceStore`:
 
 ```ts
 start(ctx) {
-	ctx.onDispose(subscribe([stores.presence, stores.sessions], redraw));
+	ctx.onDispose(subscribe(["PresenceStore", "SessionsStore"], redraw));
 },
 ```
 
-Sources are read once, when `subscribe` runs. An entry that is `undefined` then is skipped and isn't listened to later. Subscribing the same listener twice gives two subscriptions, and each unsubscribe removes only its own.
+A name is the store's name as Discord gives it. `subscribe` listens at once to a store that already exists. It waits for a store that doesn't, through Evi's `waitFor`, starts listening when Discord makes it, and calls `listener` once then, because the store may have changed before it was listened to. Unsubscribing before then stops the wait.
+
+A store or other `ChangeSource` you pass is listened to as it is. An entry that is `undefined` is skipped and isn't listened to later, so `subscribe([stores.presence], redraw)` in `start` can silently listen to nothing. Subscribing the same listener twice gives two subscriptions, and each unsubscribe removes only its own.
 
 ## useStore
 
 ```ts
 function useStore<T>(
-	watched: ChangeSource | undefined | readonly (ChangeSource | undefined)[],
+	watched: Sources,
 	getter: () => T,
 	deps?: readonly unknown[],
 ): T;
 ```
 
-Returns `getter()` and re-renders the component when a source in `watched` emits a change. A source is a Flux store or any other `ChangeSource`. It is built on `React.useSyncExternalStore`.
+Returns `getter()` and re-renders the component when a source in `watched` emits a change. A source is a Flux store, a Flux store's name, or any other `ChangeSource`, as for `subscribe`. It is built on `React.useSyncExternalStore`.
 
 ```tsx
 function CurrentChannel() {
@@ -165,7 +172,7 @@ Without `[id]`, a new `id` prop would keep showing the old user until `UserStore
 
 ### Several stores, and stores that arrive late
 
-Pass an array to listen to several stores. An entry can be `undefined`. When a store arrives on a later render, `useStore` starts listening to it then, because the subscription depends on the stores themselves and not on the array.
+Pass an array to listen to several stores. A name is listened to once Discord makes the store, and the component re-renders then. An entry can also be `undefined`. If the component renders again after such a store arrives, `useStore` starts listening to it then, because the subscription depends on the stores themselves and not on the array. But the store arriving doesn't make the component render, so name a store that may not exist yet.
 
 ```tsx
 function GuildCount() {

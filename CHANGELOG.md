@@ -10,6 +10,12 @@
 - `mist.signal` is an `AbortSignal` that aborts when the run stops, a new one for each start and an aborted one between runs, for `sleep`, `fetchWithTimeout` and `fetch`. `mist.toast` is `ctx.toast` while the plugin runs and does nothing between runs, where `mist.ctx.toast` throws.
 - `mist.define` checks `$self` names in the patches' string replacements. A `$self.name` or `$self?.name?.(…)` that the definition has no function for is a warning, logged once and listed in `HandleState.warnings` for each run, with the nearest function name when there is one. A typo used to show up as a `TypeError` inside Discord's code. Function replacements aren't checked.
 - `HandleState` has `provides` and `warnings`. Warnings aren't registry concerns, so they don't stop `mist call`.
+- `@aurologic/mist-api/discord`, a new subpath for the page side. See `docs/discord.md`.
+  - `accounts.list()` reads Discord's saved accounts whatever shape `MultiAccountStore` gives, and never copies their tokens. `accounts.current()` stays right during a switch, while `UserStore` is empty, by reading Discord's `MultiAccountSwitchStore`. `accounts.on("switching" | "signedOut" | "connected", listener)` returns its unsubscribe. `accounts.switchTo(id)` calls Discord's own switch, and `whenConnected(signal?)` resolves with the account id once Discord is connected.
+  - `discord.rest.get`, `post`, `put`, `patch`, and `del` go through Discord's own API client and throw a `DiscordApiError` with `status`, `code`, and `retryAfter`. `discord.messages(channelId, { before | after, limit })` pages through a channel's messages and waits out a 429.
+  - `navigate(path)` uses Discord's router. `avatarUrl(user, size?)` gives an avatar or Discord's default one. `copy(text)` keeps its `DiscordNative.clipboard` and `clipboard.writeText` visible to Evi's store review.
+  - `format.clock`, `format.duration`, `format.ago`, and `format.date` write in Discord's language rather than the system's.
+  - `chat.insertText(text)` types into the open message box, and `chat.localMessage(text, channelId?)` shows an "Only you can see this" message outside a slash command.
 
 ## 0.2.1
 

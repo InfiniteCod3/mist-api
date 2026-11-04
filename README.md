@@ -166,6 +166,31 @@ export default mist.define({
 
 Run `bun run dev` in your Evi checkout and turn the plugin on. Evi's [plugin guide](https://github.com/BleedDev/evi/blob/main/docs/plugins.md) covers the manifest and the build.
 
+## Use Discord's app
+
+`@aurologic/mist-api/discord` covers the parts of Discord's app that plugins often rebuild: saved accounts and account switches, Discord's own API client with typed errors and message paging, Discord's router, avatar URLs, the clipboard, times and dates in Discord's language, and the message box.
+
+```ts
+import { accounts, chat, discord, format } from "@aurologic/mist-api/discord";
+
+export async function showRecent(channelId: string) {
+	const lines: string[] = [];
+	for await (const message of discord.messages(channelId, { limit: 200 })) {
+		lines.push(`[${format.date(message.timestamp, { timeStyle: "short" })}] ${message.author.username}: ${message.content}`);
+	}
+	chat.localMessage(`Read ${lines.length} messages.`, channelId);
+	return lines;
+}
+
+export default mist.define({
+	start(ctx) {
+		ctx.onDispose(accounts.on("connected", ({ id }) => mist.log.info(`connected as ${id}`)));
+	},
+});
+```
+
+Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. [Discord](docs/discord.md) lists what each part needs.
+
 ## Debug a plugin over CDP
 
 The `mist` CLI talks to Discord over its debugging port. It runs on Node 22 or later. From npm, run it with `npx -p @aurologic/mist-api mist`, which works whether or not it's installed. Name the package with `-p`: a bare `npx mist` outside the install folder downloads an unrelated npm package called `mist`. From a checkout, run the built file, or run the source on Node 22.18 or later or on Bun:
@@ -239,6 +264,7 @@ The CLI shows the page's logs, calls, and values whole for every plugin. `mist c
 - [Events](docs/events.md) sends events from the native side to the page with `nativeEvents` and `mist.events.subscribe`.
 - [Stores](docs/stores.md) covers Discord's Flux stores and `useStore` (`@aurologic/mist-api/stores`).
 - [Util](docs/util.md) covers `isRecord`, `sleep`, `fetchWithTimeout`, `fetchJson`, `HttpError`, and the `DiscordNative` types (`@aurologic/mist-api/util`).
+- [Discord](docs/discord.md) covers accounts, Discord's API, navigation, avatars, the clipboard, formatting in Discord's language, and the message box (`@aurologic/mist-api/discord`).
 - [Bus](docs/bus.md) covers channels and slots between plugins (`@aurologic/mist-api/bus`).
 - [CLI](docs/cli.md) lists every `mist` command and flag.
 - [Security model](docs/security.md) explains the debug gate.

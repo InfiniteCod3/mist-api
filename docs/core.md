@@ -78,6 +78,9 @@ interface Mist<S extends SettingsSchema, N> {
 	readonly native: NativeClient<N>;
 	readonly log: MistLog;
 	readonly events: MistEvents<EventsOf<N>>;
+	readonly signal: AbortSignal;
+	toast(message: ReactNode, options?: ToastOptions): void;
+	readonly storage: PluginStorage;
 	define(definition: MistDefinition<S>): PluginDefinition<S>;
 	report(): Promise<string>;
 	copyReport(): Promise<boolean>;
@@ -101,9 +104,10 @@ Wraps the plugin's definition. Use it in place of `definePlugin` and export its 
 The returned definition is a copy of `definition` without `migrate` and with a wrapped `start`. The wrapper does these things before it calls your `start` with the same `this` and context:
 
 1. It sets the context that `mist.ctx` returns.
-2. It registers a dispose callback on the context that clears `mist.ctx`. The callback only clears it if the context is still the current one, so a late dispose from an earlier run doesn't clear a newer run.
+2. It registers a dispose callback on the context that aborts the run's `mist.signal` and clears `mist.ctx`. The callback only clears `mist.ctx` if the context is still the current one, so a late dispose from an earlier run doesn't clear a newer run.
 3. It asks the native side whether Discord's main process has a debugging port. The first answer is kept. A rejected call is asked again on the next debug request. [Security model](security.md) explains this check.
-4. It clears the previous run's warnings and runs the [settings migrations](#settings-migrations) that the stored settings don't have yet.
+4. It aborts the previous run's [`mist.signal`](#mistsignal), if that run wasn't disposed, and makes a new one for this run.
+5. It clears the previous run's warnings, lists the [`$self` names](#self-names) that the definition lacks, and runs the [settings migrations](#settings-migrations) that the stored settings don't have yet.
 
 While your `start` runs, and until it returns or reaches its first `await`, the wrapper watches the `stores` getters of [`@aurologic/mist-api/stores`](stores.md). After `start` returns, it checks the plugins in `needs`, as [Plugins that depend on each other](#plugins-that-depend-on-each-other) describes.
 
@@ -128,6 +132,18 @@ export default mist.define({
 ```
 
 Evi runs `stop` before the context's dispose callbacks, so `mist.ctx` and `mist.running` still work inside `stop`.
+
+#### $self names
+
+Evi rewrites `$self` in a source patch's replacement into a reference to the plugin's definition. A misspelt name, as in `$self?.injectButon?.(e)`, gives `undefined` inside Discord's code: the patch does nothing, or a call without `?.` throws a `TypeError` in Discord's own render, far from the patch.
+
+`define` reads every string `with` in `patches` for `$self.name` and `$self?.name`, and checks each name against the definition it returns. A name the definition doesn't have, or a name that is called, as in `$self.name(` or `$self?.name?.(`, without a function by that name, is a warning. `mist.log.warn` prints it once per copy of the plugin, and `HandleState.warnings` lists it for every run, so `mist status --json` and the debug report show it. When exactly one function name of the definition is within two letters of the missing name, the warning suggests it:
+
+```text
+patches[1] calls $self.injectButon, but the definition has no function injectButon, so Discord's code gets undefined there. Did you mean injectButton?
+```
+
+A `with` that is a function isn't checked, because its text exists only when Evi calls it on a module's code. Nor is a name written another way, such as `$self["name"]`.
 
 #### Settings migrations
 
@@ -242,8 +258,87 @@ readonly running: boolean;
 ```ts
 function onTimer() {
 	if (!mist.running) return;
-	mist.ctx.toast("still here");
+	mist.ctx.settings.set("lastSeen", Date.now());
 }
+```
+
+For a toast or for work to cancel, [`mist.toast`](#misttoast) and [`mist.signal`](#mistsignal) need no check.
+
+### mist.signal
+
+```ts
+readonly signal: AbortSignal;
+```
+
+An `AbortSignal` that aborts when the current run is disposed, at the same moment `mist.running` becomes `false`. Each `start` makes a new one, and a `start` without a dispose of the run before aborts that run's signal. Read between runs, it gives a signal that is already aborted. Its `reason` is a `DOMException` named `AbortError`, with the message `<id> stopped`.
+
+Read it in `start`, or in code that the run starts, and pass it to anything that takes a signal: `sleep` and `fetchWithTimeout` from [`@aurologic/mist-api/util`](util.md), `fetch`, and `addEventListener`.
+
+```ts
+async start() {
+	const signal = mist.signal;
+	while (!signal.aborted) {
+		const answer = await fetchJson("https://api.example.com/status", { signal }).catch(() => null);
+		if (answer) render(answer);
+		await sleep(60_000, signal).catch(() => { });
+	}
+},
+```
+
+Keep the signal of the run in a variable, as above. `mist.signal` read again after a restart is the new run's signal, so a loop from the old run that reads it each time would keep going.
+
+### mist.toast
+
+```ts
+toast(message: ReactNode, options?: ToastOptions): void;
+```
+
+`ctx.toast` while the plugin runs. Between runs it does nothing, where `mist.ctx.toast` throws. For a promise callback or a timer that can finish after the plugin stops.
+
+```ts
+mist.native.export(path).then(() => mist.toast("Exported", { type: "success" }));
+```
+
+### mist.storage
+
+```ts
+readonly storage: PluginStorage;
+
+interface KeyValueStore {
+	get(key: string): Promise<unknown>;
+	set(key: string, value: unknown): Promise<void>;
+	update(key: string, fn: (value: unknown) => unknown): Promise<unknown>;
+	del(key: string): Promise<void>;
+	keys(): Promise<string[]>;
+	clear(): Promise<void>;
+}
+
+interface PluginStorage extends KeyValueStore {
+	account(userId: string): KeyValueStore;
+}
+```
+
+A key-value store for the plugin, kept in the page's IndexedDB between runs and restarts. Use it for data too large for `ctx.settings`, such as a cache or a history. It works whether or not the plugin runs.
+
+- Each plugin id has its own database, named `mist-api:<id>`. It never opens the `evi-<id>` database that Evi's plugin guide suggests, so a plugin that already keeps one doesn't clash with it.
+- Values are stored as JSON text, so `JSON.stringify`'s rules apply: a `Date` comes back as its ISO string, and a key whose value is `undefined` is dropped. `set` of a value that JSON can't write, such as a `BigInt` or a cycle, rejects with `JSON.stringify`'s error and stores nothing. Each `get` returns a new copy.
+- `get` returns `unknown` because the stored data is outside the type system: an older version of the plugin may have written it. Check it before use, as with `fetchJson`.
+- `update` reads the value, calls `fn` with it, and writes what `fn` returns, in one transaction. Two updates of a key at the same time run one after the other, so neither loses the other's write. `fn` must be synchronous, because IndexedDB ends the transaction at the first `await`. If `fn` returns `undefined`, the key is deleted. If `fn` throws, nothing changes and `update` rejects with that error. `update` resolves to the stored value.
+- Every error rejects the call's promise. Where IndexedDB is missing, or throws when it is opened, each call rejects with `IndexedDB isn't available on this page, so mist-api:<id> can't be opened` or IndexedDB's own error. The next call tries again.
+- If another page deletes or upgrades the database, mist closes its connection so that it isn't blocked, and opens the database again on the next call.
+
+```ts
+const seen = await mist.storage.update("seen", value => (typeof value === "number" ? value : 0) + 1);
+await mist.storage.set("cache", { at: Date.now(), items });
+```
+
+`account(userId)` is a separate store for one Discord account, in the database `mist-api:<id>:account:<userId>`. Discord switches accounts without reloading the page, so data that belongs to an account, such as drafts or per-server state, goes in that account's store. Bind the store when you start work for an account, and bind again after a switch, so that a write that finishes after a switch still goes to the account it belongs to. `account` throws a `TypeError` for an empty or missing id.
+
+```ts
+import { currentUserId } from "@aurologic/mist-api/stores";
+
+const userId = currentUserId();
+if (userId) await mist.storage.account(userId).set("draft", text);
 ```
 
 ### mist.native
@@ -451,7 +546,7 @@ interface HandleState {
 }
 ```
 
-`provides` is the plugin's `provides` option. `warnings` lists what the plugin got wrong in the current run: a [store read too early](#stores-read-too-early), a [needed plugin at another version](#plugins-that-depend-on-each-other), or a [settings migration](#settings-migrations) that threw. Both are absent from handles made by copies of 0.2.1 and earlier. Warnings aren't registry concerns: they don't make `mist call` refuse.
+`provides` is the plugin's `provides` option. `warnings` lists what the plugin got wrong in the current run: a [store read too early](#stores-read-too-early), a [needed plugin at another version](#plugins-that-depend-on-each-other), a [settings migration](#settings-migrations) that threw, or a [`$self` name](#self-names) that the definition lacks. Both are absent from handles made by copies of 0.2.1 and earlier. Warnings aren't registry concerns: they don't make `mist call` refuse.
 
 `HandleState.native` is `"unknown"` until the plugin first starts. Then it is `"none"` for a plugin without a native module, `"plain"` for a native module not made with `defineNative`, and `"mist"` for one made with `defineNative`. `errors` counts the failed calls and the `error` lines still kept in the page side's rings. `quiet` counts the calls of each `quiet` method.
 
@@ -467,4 +562,4 @@ Every recorded argument, result, exposed value, and setting is copied once, when
 
 ## Exported types
 
-`@aurologic/mist-api` also exports these types: `Mist`, `MistOptions`, `MistLog`, `SafeOptions`, `MistDefinition`, `Migration`, `MigrationSettings`, `Need`, `Provides`, `MistEvents`, `SubscribeOptions`, `EventsOf`, `EventsAnswer`, `NativeClient`, `MistCapability`, `MistHandle`, `HandleState`, `NativeKind`, `RegistryHistory`, `CallRecord`, `CallOutcome`, `LogRecord`, `LogLevel`, `NativeLogs`, `ReducedNativeLogs`, `Shown`, `Reduced`, and `Snapshot`. `Reduced` is a branded string, the type and size that a reduced view shows. `Shown` is `Snapshot | Reduced`, a value from a view that may or may not be open. `MIST_VERSION` is the version string of the copy, `"0.2.1"`. `SETTINGS_VERSION` is the settings key that holds the migrated version, `"__mist_settingsVersion"`.
+`@aurologic/mist-api` also exports these types: `Mist`, `MistOptions`, `MistLog`, `SafeOptions`, `MistDefinition`, `Migration`, `MigrationSettings`, `KeyValueStore`, `PluginStorage`, `Need`, `Provides`, `MistEvents`, `SubscribeOptions`, `EventsOf`, `EventsAnswer`, `NativeClient`, `MistCapability`, `MistHandle`, `HandleState`, `NativeKind`, `RegistryHistory`, `CallRecord`, `CallOutcome`, `LogRecord`, `LogLevel`, `NativeLogs`, `ReducedNativeLogs`, `Shown`, `Reduced`, and `Snapshot`. `Reduced` is a branded string, the type and size that a reduced view shows. `Shown` is `Snapshot | Reduced`, a value from a view that may or may not be open. `MIST_VERSION` is the version string of the copy, `"0.2.1"`. `SETTINGS_VERSION` is the settings key that holds the migrated version, `"__mist_settingsVersion"`.

@@ -1,11 +1,12 @@
 # mist-api
 
-mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in five ways:
+mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in six ways:
 
 - Native calls are typed from the native module itself. `await mist.native.lookup(place)` gets its argument and result types from `native.ts`, so a renamed method or a changed argument fails the typecheck.
 - The native side can send events to the page. Evi's native side can't push, so `mist.events.subscribe` long-polls a channel made with `nativeEvents`, in order, and loads the page's state again after a restart.
-- The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`.
-- Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, and a bus between plugins.
+- The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`. `mist.signal` aborts when the run stops, and `mist.toast` does nothing after it, so timers and promise callbacks need no `mist.running` check.
+- Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, a bus between plugins, and `mist.storage`, a key-value store in IndexedDB for each plugin and, if you want, each account.
+- `mist.define` checks the plugin's patches. A `$self` name in a patch that the definition has no function for is a warning in the log and in `mist status`, not a `TypeError` inside Discord's code.
 - Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port.
 
 It is a general library for anyone who writes Evi plugins. Evi's build bundles everything a plugin imports except `@evi/api`, React, and `electron`, so each plugin carries its own copy of mist-api. State that plugins share, such as the debug registry and the bus, lives on `globalThis` under versioned `Symbol.for` keys, so copies of different versions work together.

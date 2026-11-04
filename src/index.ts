@@ -7,7 +7,9 @@ import { errorMessage, type EventsAnswer, HIDDEN, type HiddenMethod, type LogLev
 import { createRecorder, type RecordingOptions } from "./recorder.ts";
 import { eviOf, registry } from "./registry.ts";
 import { buildReport, copyText } from "./report.ts";
+import { checkSelf } from "./self.ts";
 import { whileStarting } from "./start.ts";
+import { createStorage, type PluginStorage } from "./storage.ts";
 import { type MistEvents, subscribe } from "./subscribe.ts";
 
 export { onDemand } from "./patches.ts";
@@ -18,6 +20,7 @@ export type { MistCapability } from "./debug.ts";
 export type { Need, Provides } from "./needs.ts";
 export type { HandleState, MistHandle, NativeKind, RegistryHistory } from "./registry.ts";
 export type { Reduced, Snapshot } from "./values.ts";
+export type { KeyValueStore, PluginStorage } from "./storage.ts";
 
 type Method = (...args: any[]) => unknown;
 
@@ -90,7 +93,16 @@ export interface Mist<S extends SettingsSchema, N> {
     readonly log: MistLog;
     /** Events from the native side's channel (nativeEvents), typed from the native module */
     readonly events: MistEvents<EventsOf<N>>;
-    /** Wraps the plugin's definition: keeps mist.ctx current, runs settings migrations and registers the plugin for debugging */
+    /** Aborts when the current run stops. A fresh signal each start; read between runs, it is already aborted. */
+    readonly signal: AbortSignal;
+    /** ctx.toast while running; does nothing between runs */
+    toast(...args: Parameters<PluginContext<S>["toast"]>): void;
+    /** The plugin's key-value store in IndexedDB, kept between runs and restarts */
+    readonly storage: PluginStorage;
+    /**
+     * Wraps the plugin's definition: keeps mist.ctx current, runs settings migrations and registers the plugin for debugging.
+     * Warns about `$self` names in string patch replacements that the definition has no function for.
+     */
     define(definition: MistDefinition<S>): PluginDefinition<S>;
     /** A debug report for a bug report: versions, status, recent logs and calls, each value reduced to its type and size */
     report(): Promise<string>;
@@ -151,6 +163,8 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
     let current: PluginContext<S> | undefined;
     let startedAt: number | null = null;
     let unregister: (() => void) | undefined;
+    let run: AbortController | undefined;
+    const stopped = () => new DOMException(`${id} stopped`, "AbortError");
 
     const ctx = () => {
         if (!current) throw new Error(`${id} isn't running: mist.ctx only exists from start until the run is disposed`);
@@ -244,6 +258,10 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
         native,
         log,
 
+        get signal() { return current && run ? run.signal : AbortSignal.abort(stopped()); },
+        toast(...args) { current?.toast(...args); },
+        storage: createStorage(id),
+
         events: {
             subscribe(listener, options) {
                 const context = ctx();
@@ -260,7 +278,7 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
             const steps = ordered(migrations);
             unregister?.();
             unregister = registered.register(debug.handle);
-            return {
+            const wrapped: PluginDefinition<S> = {
                 ...definition,
                 start(this: PluginDefinition<S>, context: PluginContext<S>) {
                     current = context;
@@ -271,19 +289,33 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
                         unregister = registered.register(debug.handle);
                         if (registered.get(id) !== debug.handle) log.warn(`Another handle holds ${id} in the debug registry and says it is running, so \`mist\` can't reach this run`);
                     }
+                    run?.abort(stopped());
+                    const mine = run = new AbortController();
                     context.onDispose(() => {
-                        if (current !== context) return;
-                        current = undefined;
-                        startedAt = null;
+                        if (current === context) {
+                            current = undefined;
+                            startedAt = null;
+                        }
+                        mine.abort(stopped());
                     });
                     void debug.probe(context);
                     warnings.clear();
+                    for (const line of selfProblems) {
+                        warnings.set(`self ${line}`, line);
+                        if (!told.has(`self ${line}`)) {
+                            told.add(`self ${line}`);
+                            log.warn(line);
+                        }
+                    }
                     migrate(context, steps);
                     const started = whileStarting(storeMissed, () => start?.call(this, context));
                     watchNeeds(context);
                     return started;
                 },
             };
+            // Evi's $self is this object, with the wrapper's start
+            const selfProblems = checkSelf(wrapped);
+            return wrapped;
         },
 
         report: () => buildReport(debug.handle, registered),

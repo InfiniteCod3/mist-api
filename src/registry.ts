@@ -29,7 +29,8 @@ export interface HandleState {
     provides?: Record<string, number>;
     /**
      * What the plugin got wrong in this run: a store read in start before Discord made it, a plugin it
-     * needs at another protocol version, a settings migration that threw. Absent from older copies.
+     * needs at another protocol version, a settings migration that threw, a `$self` name in a patch
+     * that the definition lacks. Absent from older copies.
      */
     warnings?: string[];
 }

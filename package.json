@@ -87,6 +87,7 @@
         "@types/node": "^26.6.3",
         "@types/react": "19",
         "@types/react-test-renderer": "19",
+        "fake-indexeddb": "^6.2.7",
         "react": "19",
         "react-test-renderer": "19",
         "typescript": "^7.0.2",

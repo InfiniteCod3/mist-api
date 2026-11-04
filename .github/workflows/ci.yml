@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      # Clones BleedDev/evi into .evi, so @evi/api resolves
+      - run: bun scripts/setup.ts
+      - run: bun run typecheck
+      - run: bun run build
+      - run: bun test
+      - run: node dist/bin/mist.js --help
+      - run: node scripts/check-pack.ts
+      - name: npm publish would not rewrite package.json
+        run: "! npm publish --dry-run --ignore-scripts 2>&1 | grep -iE \"corrected|invalid and removed\""
+      - run: bun scripts/check-install.ts

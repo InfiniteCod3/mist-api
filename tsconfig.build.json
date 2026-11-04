@@ -1,0 +1,21 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "declaration": true,
+        "sourceMap": true,
+        "inlineSources": true,
+        "rewriteRelativeImportExtensions": true,
+        "rootDir": "src",
+        "outDir": "dist",
+        "types": [],
+        // Evi's sources through node_modules: the compiler takes them as a library's, so it neither
+        // emits them nor asks them to be under rootDir. scripts/setup.ts makes the link.
+        "paths": {
+            "@evi/api": ["./node_modules/.evi/src/api/index.ts"],
+            "@evi/api/*": ["./node_modules/.evi/src/api/*"],
+            "@shared/*": ["./node_modules/.evi/src/shared/*"]
+        }
+    },
+    "include": ["src", "node_modules/.evi/src/shared/globals.d.ts"]
+}

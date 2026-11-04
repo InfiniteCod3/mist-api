@@ -1,0 +1,13 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "sourceMap": true,
+        "inlineSources": true,
+        "rewriteRelativeImportExtensions": true,
+        "rootDir": "bin",
+        "outDir": "dist/bin",
+        "types": ["node"]
+    },
+    "include": ["bin"]
+}

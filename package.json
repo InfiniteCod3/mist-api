@@ -1,0 +1,95 @@
+{
+    "name": "@aurologic/mist-api",
+    "version": "0.2.0",
+    "description": "A library for Evi plugins: typed native calls, native-to-page events, Flux store hooks, a cross-plugin bus, and debugging over CDP",
+    "author": "Aurologic",
+    "license": "GPL-3.0-or-later",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/InfiniteCod3/mist-api.git"
+    },
+    "homepage": "https://github.com/InfiniteCod3/mist-api#readme",
+    "bugs": "https://github.com/InfiniteCod3/mist-api/issues",
+    "type": "module",
+    "keywords": [
+        "evi",
+        "discord",
+        "plugin",
+        "cdp"
+    ],
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        },
+        "./native": {
+            "types": "./dist/native.d.ts",
+            "import": "./dist/native.js",
+            "default": "./dist/native.js"
+        },
+        "./stores": {
+            "types": "./dist/stores.d.ts",
+            "import": "./dist/stores.js",
+            "default": "./dist/stores.js"
+        },
+        "./util": {
+            "types": "./dist/util.d.ts",
+            "import": "./dist/util.js",
+            "default": "./dist/util.js"
+        },
+        "./bus": {
+            "types": "./dist/bus.d.ts",
+            "import": "./dist/bus.js",
+            "default": "./dist/bus.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "bin": {
+        "mist": "dist/bin/mist.js"
+    },
+    "files": [
+        "dist",
+        "docs",
+        "README.md",
+        "CHANGELOG.md",
+        "SECURITY.md",
+        "LICENSE"
+    ],
+    "sideEffects": false,
+    "publishConfig": {
+        "access": "public"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "scripts": {
+        "setup": "bun scripts/setup.ts",
+        "build": "bun scripts/build.ts",
+        "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p .",
+        "test": "bun test",
+        "check-pack": "node scripts/check-pack.ts",
+        "check-install": "bun scripts/check-install.ts",
+        "prepublishOnly": "npm run build && npm run typecheck && npm test"
+    },
+    "peerDependencies": {
+        "@evi/api": "*"
+    },
+    "peerDependenciesMeta": {
+        "@evi/api": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@types/bun": "^1.4.2",
+        "@types/node": "^26.6.3",
+        "@types/react": "19",
+        "@types/react-test-renderer": "19",
+        "react": "19",
+        "react-test-renderer": "19",
+        "typescript": "^7.0.2",
+        "typescript-emit": "npm:typescript@6.0.3"
+    }
+}

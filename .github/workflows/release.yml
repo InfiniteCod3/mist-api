@@ -1,0 +1,37 @@
+# On a v* tag, checks the package and stages it on npm with trusted publishing (OIDC) and provenance.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # npm trusted publishing and the provenance statement both use the workflow's OIDC token
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      # npm stage publish needs npm 11.15 or later and Node 22.14 or later; Node 26 ships npm 12
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm --version
+      - name: The tag matches package.json
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then echo "::error::Tag ${GITHUB_REF_NAME} isn't v${version}"; exit 1; fi
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/setup.ts
+      - run: bun run typecheck
+      - run: bun run build
+      - run: bun test
+      - run: node scripts/check-pack.ts
+      # The checks above already ran, so prepublishOnly is skipped and the tarball check-pack saw is the one staged
+      - run: npm stage publish --ignore-scripts

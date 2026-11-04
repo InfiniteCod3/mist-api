@@ -1,0 +1,204 @@
+import { expect, mock, test } from "bun:test";
+import * as React from "react";
+import { act, create } from "react-test-renderer";
+
+import type { ChangeSource } from "../src/stores";
+
+const found = new Map<string, unknown>();
+/** Evi's findStore throws while Discord's webpack isn't there yet */
+let webpackReady = true;
+const looked: string[] = [];
+mock.module("@evi/api", () => ({
+    React,
+    findStore: (name: string) => {
+        looked.push(name);
+        if (!webpackReady) throw new Error("webpack isn't ready");
+        return found.get(name);
+    },
+}));
+const { currentUserId, isStreamerMode, stores, subscribe, useStore } = await import("../src/stores");
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean; }).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** A Flux store: listeners, and a change() that notifies them */
+function fakeStore<T extends object>(state: T) {
+    const listeners = new Set<() => void>();
+    return Object.assign(state, {
+        addChangeListener: (l: () => void) => void listeners.add(l),
+        removeChangeListener: (l: () => void) => void listeners.delete(l),
+        change(next: Partial<T>) {
+            Object.assign(state, next);
+            for (const l of [...listeners]) l();
+        },
+        listeners,
+    });
+}
+
+test("re-renders when the store changes, and stops listening on unmount", () => {
+    const store = fakeStore({ name: "a" });
+    let renders = 0;
+    function Name() {
+        renders++;
+        return React.createElement("span", null, useStore(store, () => store.name));
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(Name)); });
+    expect(root.toJSON()).toMatchObject({ children: ["a"] });
+
+    act(() => store.change({ name: "b" }));
+    expect(root.toJSON()).toMatchObject({ children: ["b"] });
+
+    act(() => root.unmount());
+    expect(store.listeners.size).toBe(0);
+    expect(renders).toBeGreaterThanOrEqual(2);
+});
+
+test("a getter that builds a new array each time renders once per change, not forever", () => {
+    const store = fakeStore({ ids: ["1", "2"] });
+    let renders = 0;
+    function Ids() {
+        renders++;
+        const ids = useStore(store, () => store.ids.map(id => `#${id}`));
+        return React.createElement("span", null, ids.join(","));
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(Ids)); });
+    const afterMount = renders;
+    act(() => store.change({ ids: ["3"] }));
+    expect(root.toJSON()).toMatchObject({ children: ["#3"] });
+    expect(renders - afterMount).toBe(1);
+    act(() => root.unmount());
+});
+
+test("deps rebuild the value when what the getter reads besides the store changes", () => {
+    const store = fakeStore({ users: { a: "Ann", b: "Bob" } as Record<string, string> });
+    function User({ id }: { id: string; }) {
+        return React.createElement("span", null, useStore(store, () => ({ name: store.users[id] }), [id]).name);
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(User, { id: "a" })); });
+    act(() => root.update(React.createElement(User, { id: "b" })));
+    expect(root.toJSON()).toMatchObject({ children: ["Bob"] });
+    act(() => root.unmount());
+});
+
+test("listens to every store in a list, and to a store that shows up later", () => {
+    const a = fakeStore({ n: 1 });
+    const b = fakeStore({ n: 10 });
+    let late: typeof b | undefined;
+    function Sum() {
+        return React.createElement("span", null, String(useStore([a, late], () => a.n + (late?.n ?? 0))));
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(Sum)); });
+    expect(root.toJSON()).toMatchObject({ children: ["1"] });
+    late = b;
+    act(() => a.change({ n: 2 }));
+    expect(root.toJSON()).toMatchObject({ children: ["12"] });
+    act(() => b.change({ n: 20 }));
+    expect(root.toJSON()).toMatchObject({ children: ["22"] });
+    act(() => root.unmount());
+    expect(a.listeners.size + b.listeners.size).toBe(0);
+});
+
+test("store getters look the store up when read", () => {
+    expect(stores.user).toBeUndefined();
+    expect(currentUserId()).toBeUndefined();
+    found.set("UserStore", { getCurrentUser: () => ({ id: "42" }) });
+    expect(currentUserId()).toBe("42");
+});
+
+test("a UserStore without getCurrentUser gives no id, and the type makes callers check", () => {
+    found.set("UserStore", {});
+    expect(currentUserId()).toBeUndefined();
+    // @ts-expect-error getCurrentUser may be missing: call it with ?.()
+    expect(() => stores.user!.getCurrentUser()).toThrow();
+});
+
+test("store getters and currentUserId give undefined while webpack isn't ready, and look again next time", () => {
+    found.set("UserStore", { getCurrentUser: () => ({ id: "7" }) });
+    webpackReady = false;
+    expect(stores.user).toBeUndefined();
+    expect(currentUserId()).toBeUndefined();
+    webpackReady = true;
+    expect(currentUserId()).toBe("7");
+});
+
+test("presence and sessions are looked up by Discord's store names", () => {
+    const presence = { getClientStatus: () => ({ desktop: "online" }) };
+    found.set("PresenceStore", presence);
+    looked.length = 0;
+    expect(stores.presence).toBe(presence as never);
+    expect(stores.sessions).toBeUndefined();
+    expect(looked).toEqual(["PresenceStore", "SessionsStore"]);
+});
+
+test("streamerMode is Discord's StreamerModeStore, and isStreamerMode reads each shape Discord builds have had", () => {
+    found.delete("StreamerModeStore");
+    expect(isStreamerMode()).toBe(false);
+    const getter = { enabled: true };
+    found.set("StreamerModeStore", getter);
+    looked.length = 0;
+    expect(stores.streamerMode).toBe(getter as never);
+    expect(looked).toEqual(["StreamerModeStore"]);
+    expect(isStreamerMode()).toBe(true);
+    found.set("StreamerModeStore", { isEnabled: () => true });
+    expect(isStreamerMode()).toBe(true);
+    found.set("StreamerModeStore", { getState: () => ({ enabled: true }) });
+    expect(isStreamerMode()).toBe(true);
+    found.set("StreamerModeStore", { enabled: false, isEnabled: () => false, getState: () => ({}) });
+    expect(isStreamerMode()).toBe(false);
+    webpackReady = false;
+    expect(isStreamerMode()).toBe(false);
+    webpackReady = true;
+});
+
+test("subscribe calls the listener on each store's change until unsubscribed", () => {
+    const a = fakeStore({});
+    const b = fakeStore({});
+    let heard = 0;
+    const unsubscribe = subscribe([a, undefined, b], () => heard++);
+    a.change({});
+    b.change({});
+    expect(heard).toBe(2);
+    unsubscribe();
+    unsubscribe();
+    a.change({});
+    expect(heard).toBe(2);
+    expect(a.listeners.size + b.listeners.size).toBe(0);
+});
+
+test("the same listener subscribed twice unsubscribes each subscription on its own", () => {
+    const store = fakeStore({});
+    let heard = 0;
+    const listener = () => heard++;
+    const first = subscribe(store, listener);
+    subscribe(store, listener);
+    first();
+    store.change({});
+    expect(heard).toBe(1);
+});
+
+/** A plugin's own change source, not a Flux store */
+class Counter implements ChangeSource {
+    count = 0;
+    private readonly listeners = new Set<() => void>();
+    addChangeListener(listener: () => void) { this.listeners.add(listener); }
+    removeChangeListener(listener: () => void) { this.listeners.delete(listener); }
+    bump() {
+        this.count++;
+        for (const l of [...this.listeners]) l();
+    }
+}
+
+test("useStore and subscribe take a plugin's own change source", () => {
+    const counter = new Counter();
+    function Count() {
+        return React.createElement("span", null, String(useStore(counter, () => counter.count)));
+    }
+    let root!: ReturnType<typeof create>;
+    act(() => { root = create(React.createElement(Count)); });
+    act(() => counter.bump());
+    expect(root.toJSON()).toMatchObject({ children: ["1"] });
+    act(() => root.unmount());
+});

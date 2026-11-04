@@ -43,6 +43,11 @@
             "import": "./dist/bus.js",
             "default": "./dist/bus.js"
         },
+        "./discord": {
+            "types": "./dist/discord.d.ts",
+            "import": "./dist/discord.js",
+            "default": "./dist/discord.js"
+        },
         "./package.json": "./package.json"
     },
     "main": "./dist/index.js",

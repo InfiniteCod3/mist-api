@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `@aurologic/mist-api/discord`, a new subpath for the page side. See `docs/discord.md`.
+  - `accounts.list()` reads Discord's saved accounts whatever shape `MultiAccountStore` gives, and never copies their tokens. `accounts.current()` stays right during a switch, while `UserStore` is empty, by reading Discord's `MultiAccountSwitchStore`. `accounts.on("switching" | "signedOut" | "connected", listener)` returns its unsubscribe. `accounts.switchTo(id)` calls Discord's own switch, and `whenConnected(signal?)` resolves with the account id once Discord is connected.
+  - `discord.rest.get`, `post`, `put`, `patch`, and `del` go through Discord's own API client and throw a `DiscordApiError` with `status`, `code`, and `retryAfter`. `discord.messages(channelId, { before | after, limit })` pages through a channel's messages and waits out a 429.
+  - `navigate(path)` uses Discord's router. `avatarUrl(user, size?)` gives an avatar or Discord's default one. `copy(text)` keeps its `DiscordNative.clipboard` and `clipboard.writeText` visible to Evi's store review.
+  - `format.clock`, `format.duration`, `format.ago`, and `format.date` write in Discord's language rather than the system's.
+  - `chat.insertText(text)` types into the open message box, and `chat.localMessage(text, channelId?)` shows an "Only you can see this" message outside a slash command.
+
 ## 0.2.1
 
 - `subscribe` and `useStore` in `@aurologic/mist-api/stores` take a Flux store's name, such as `"PresenceStore"`. A store Discord hasn't made yet is listened to once it has, and the listener is called then. Evi starts plugins before Discord makes many of its stores, so `subscribe([stores.presence], redraw)` in `start` could listen to nothing after a cold start; `subscribe(["PresenceStore"], redraw)` can't. The docs' own example showed the first form and now shows the second.

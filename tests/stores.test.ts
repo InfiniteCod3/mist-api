@@ -276,3 +276,53 @@ test("useStore and subscribe take a plugin's own change source", () => {
     expect(root.toJSON()).toMatchObject({ children: ["1"] });
     act(() => root.unmount());
 });
+
+const { createMist } = await import("../src/index");
+const { fakeContext, mistNative, settle } = await import("./helpers");
+
+test("a store read in start before Discord made it is a warning for that plugin: logged once, in its status each run", () => {
+    found.delete("PresenceStore");
+    const mist = createMist("t-early-read");
+    const listened: unknown[] = [];
+    const definition = mist.define({
+        start(ctx) { ctx.onDispose(subscribe([stores.presence], () => listened.push("change"))); },
+    });
+    const first = fakeContext(mistNative(false), {}, "t-early-read");
+    definition.start!(first.ctx);
+    const warnings = () => (globalThis as any).Mist.get("t-early-read").state().warnings;
+    expect(warnings()).toEqual([expect.stringContaining('PresenceStore before Discord made it')]);
+    expect(warnings()[0]).toContain('subscribe(["PresenceStore"], …)');
+    expect(first.printed.filter(p => p.level === "warn").map(p => p.args[0])).toEqual(warnings());
+
+    first.dispose();
+    const second = fakeContext(mistNative(false), {}, "t-early-read");
+    definition.start!(second.ctx);
+    expect(warnings()).toHaveLength(1);
+    expect(second.printed.filter(p => p.level === "warn")).toEqual([]);
+
+    second.dispose();
+    arrive("PresenceStore", fakeStore({}));
+    definition.start!(fakeContext(mistNative(false), {}, "t-early-read").ctx);
+    expect(warnings()).toEqual([]);
+});
+
+test("only the synchronous part of start is watched, only the starting plugin is blamed, and a store named to subscribe isn't a read", async () => {
+    found.delete("SessionsStore");
+    found.delete("MultiAccountStore");
+    const mine = createMist("t-start-sync");
+    const other = createMist("t-start-other");
+    const definition = mine.define({
+        async start(ctx) {
+            ctx.onDispose(subscribe(["SessionsStore"], () => { }));
+            await settle();
+            void stores.multiAccount;
+        },
+    });
+    other.define({});
+    const started = definition.start!(fakeContext(mistNative(false)).ctx);
+    void stores.multiAccount;
+    await started;
+    const Mist = (globalThis as any).Mist;
+    expect(Mist.get("t-start-sync").state().warnings).toEqual([]);
+    expect(Mist.get("t-start-other").state().warnings).toEqual([]);
+});

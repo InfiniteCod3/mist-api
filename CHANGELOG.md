@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Debug reports for users who can't run the CLI: `mist.report()` returns a report with the plugin, mist-api, Evi and Discord versions, the plugin's status, and its recent page and native logs and calls. Every recorded value shows as its type and size only. `mist.copyReport()` copies it and toasts the result, for a button in `settingsPanel`, and `mist.reportCommand()` is a slash command for `ctx.command` that copies it, or shows it when copying fails.
+- A `stores` getter that reads a missing store during the synchronous part of a plugin's `start` is a warning: `mist.log.warn` prints it once, naming the store and `subscribe(["StoreName"], …)` or `useStore("StoreName", …)` as the fix, and `HandleState.warnings` lists it for the run. Evi starts plugins before Discord makes many stores, so such a read gets `undefined` and code built on it does nothing.
+- `createMist` takes `provides`, the bus protocols a plugin offers with their versions, and `needs`, the protocols it speaks with other plugins. The handle advertises `provides`. A needed plugin that is installed and turned on, but provides another version or says nothing (copies of 0.2.1 and earlier), is a warning in `HandleState.warnings`, a log line, and one toast that tells the user which plugin to update.
+- Settings migrations: `mist.define({ migrate: [{ to, run }] })` runs each step whose `to` is above the stored settings version, in order, before `start`, and stores the version with the plugin's settings under `__mist_settingsVersion` (`SETTINGS_VERSION`). Evi keeps stored values of keys a schema no longer declares, so a step can read a renamed setting's old value. A step that throws is logged and listed in `HandleState.warnings`, and the plugin still starts; it runs again at the next start.
+- `HandleState` has `provides` and `warnings`. Warnings aren't registry concerns, so they don't stop `mist call`.
+
 ## 0.2.1
 
 - `subscribe` and `useStore` in `@aurologic/mist-api/stores` take a Flux store's name, such as `"PresenceStore"`. A store Discord hasn't made yet is listened to once it has, and the listener is called then. Evi starts plugins before Discord makes many of its stores, so `subscribe([stores.presence], redraw)` in `start` could listen to nothing after a cold start; `subscribe(["PresenceStore"], redraw)` can't. The docs' own example showed the first form and now shows the second.

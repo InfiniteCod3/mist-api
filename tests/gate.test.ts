@@ -16,6 +16,8 @@ async function setup(native: NativeImpl) {
         context: () => run.ctx,
         startedAt: () => 0,
         callNative,
+        provides: {},
+        warnings: () => [],
     });
     await debug.probe(run.ctx);
     await callNative("echo", ["private text"]).catch(() => { });

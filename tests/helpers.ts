@@ -30,16 +30,21 @@ export function fakeContext(native: NativeImpl, settings: Record<string, unknown
     const disposers: (() => void)[] = [];
     const printed: { level: string; args: unknown[]; }[] = [];
     const logger = Object.fromEntries(["log", "debug", "info", "warn", "error"].map(level => [level, (...args: unknown[]) => void printed.push({ level, args })]));
+    const toasts: string[] = [];
     const ctx = {
         id,
+        manifest: { id, name: id },
         native: { call: native },
         logger,
-        settings: { all: settings },
+        // Evi's get reads any stored key, declared or not, and set writes any key
+        settings: { all: settings, get: (key: string) => settings[key], set: (key: string, value: unknown) => void (settings[key] = value) },
+        toast: (message: string) => void toasts.push(message),
         onDispose: (fn: () => void) => void disposers.push(fn),
     } as unknown as PluginContext<any>;
     return {
         ctx,
         printed,
+        toasts,
         /** What Evi does on stop: disposers, newest first */
         dispose: () => { for (const fn of disposers.splice(0).reverse()) fn(); },
     };

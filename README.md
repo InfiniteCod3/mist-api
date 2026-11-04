@@ -82,6 +82,7 @@ A git dependency such as `github:InfiniteCod3/mist-api` doesn't work, because `d
 4. For a native side, write `native.ts` with `defineNative`. Pass `typeof native` to `createMist`, imported with `import type`.
 5. Run `bun run dev` in your Evi checkout and turn the plugin on.
 6. Start Discord with a debugging port with `npx -p @aurologic/mist-api mist restart`. Then read the plugin with `mist status`, `mist logs <id>`, and `mist calls <id>` the same way.
+7. For bug reports from users, who can't run the CLI, offer `mist.copyReport()` in a settings panel button or `mist.reportCommand()` as a slash command. [mist.report](docs/core.md#mistreport) lists what the report contains.
 
 The example below shows each file. [Migrate a plugin to mist-api](docs/migration.md) covers a plugin that already exists.
 

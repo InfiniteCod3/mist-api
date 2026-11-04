@@ -25,12 +25,21 @@ export interface HandleState {
     errors: { calls: number; logs: number; };
     /** Calls of each quiet method on the page side, which aren't kept */
     quiet?: Record<string, number>;
+    /** The bus protocols the plugin says it provides, and their versions. Absent from older copies. */
+    provides?: Record<string, number>;
+    /**
+     * What the plugin got wrong in this run: a store read in start before Discord made it, a plugin it
+     * needs at another protocol version, a settings migration that threw. Absent from older copies.
+     */
+    warnings?: string[];
 }
 
 /** A plugin's entry in the registry. Values are reduced to type and size; nothing here can call the plugin. */
 export interface MistHandle {
     readonly id: string;
     readonly mistVersion: string;
+    /** The bus protocols the plugin provides and their versions. Copies of 0.2.1 and earlier have none. */
+    readonly provides?: Readonly<Record<string, number>>;
     state(): HandleState;
     logs(n?: number): LogRecord<Reduced>[];
     calls(n?: number): CallRecord<Reduced>[];
@@ -73,11 +82,18 @@ export interface Registry {
 
 interface PatchDiagnosis { plugin: string; index: number; health: string; errors?: string[]; patch?: { find?: unknown; }; }
 interface LookupDiagnosis { plugin: string; target: string; health: string; }
-interface EviDebug {
+/** What mist reads of `window.Evi`. Every member is optional: page code can replace `Evi.plugins`, and older Evis lack some. */
+export interface EviDebug {
+    version?: string;
     diagnosePatches?(): PatchDiagnosis[];
     diagnoseLookups?(plugin?: string): LookupDiagnosis[];
-    plugins?: { get(id: string): { running?: boolean; error?: string; } | undefined; };
+    plugins?: {
+        get(id: string): { running?: boolean; error?: string; evaluated?: boolean; manifest?: { name?: string; version?: string; }; } | undefined;
+        subscribe?(listener: () => void): () => void;
+    };
 }
+
+export const eviOf = (root: object = globalThis) => (root as { Evi?: EviDebug; }).Evi;
 
 const PATCH_PROBLEMS = new Set(["failed", "partial", "broken", "ambiguous"]);
 const LOOKUP_PROBLEMS = new Set(["broken", "missing"]);
@@ -151,7 +167,7 @@ interface Entry {
 
 function createRegistry(root: object): Registry {
     const entries = new Map<string, Entry>();
-    const evi = () => (root as { Evi?: EviDebug; }).Evi;
+    const evi = () => eviOf(root);
     return Object.freeze({
         version: 1 as const,
         register(handle: MistHandle) {
@@ -205,7 +221,7 @@ export function registry(root: object = globalThis): Registry {
         version: 1 as const,
         list: () => created.list().map(h => ({ id: h.id, mistVersion: h.mistVersion, running: unwrap(attempt(() => h.state().running), r => r) })),
         get: (id: string) => created.get(id),
-        status: () => status(created.list(), (root as { Evi?: EviDebug; }).Evi, created),
+        status: () => status(created.list(), eviOf(root), created),
     });
     // Not configurable, so page code can't put a lying status in its place. Something that took the name first keeps it.
     try {

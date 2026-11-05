@@ -33,6 +33,13 @@
   - `secrets(ctx)` keeps strings encrypted with Electron's `safeStorage` in the plugin's folder, with `encrypted: false` when Electron falls back to Chromium's built-in key on Linux. Other plugins' native code shares the process and can read them; the docs say so.
   - `pathGrants(ctx)` shows a file or folder dialog and gives the page an opaque handle; only native code turns it into a path with `resolveGrant`, and a folder's handle reaches only paths inside it.
 - Inside a `defineNative` method, `this` is the module plus the call's `signal`; state a method stores on `this` still lands on the module.
+- `@aurologic/mist-api/ui`, a new subpath for a plugin's UI inside Discord's. See `docs/ui.md`.
+  - `Boundary` and `boundary(Component, { fallback, name, mist })` catch render errors in a plugin's UI and show a one-line notice with Retry, a node, or a function of the error and a retry, in place of the UI. Each distinct error is logged once, through the plugin's `mist.log` or the console.
+  - `state(initial)` is an observable value with `get`, `set` and `update`, and a `ChangeSource`, so `useStore` and `subscribe` take it. `useValue(state)` is its hook.
+  - `host(name)` is a mount point for patches that stays the same component across hot reloads and copies of mist-api. It renders what the running plugin `set`, and nothing while the plugin is stopped.
+  - `chatBar.add`, `popover.add` and `accessories.add` add buttons to the chat bar before the send button, buttons to the hover bar of each message, and UI under each message. `ChatBarButton` looks like Discord's own chat bar buttons, and a hover bar entry gets Discord's hover bar button to render.
+  - `messages.beforeSend` and `messages.beforeEdit` run listeners, which may be async, before a message from the chat box is sent and before an edit is saved. A listener can change the content or return `{ cancel: true }` to keep the text in the box.
+  - Each registry has `patches` for the plugin's `patches`. Plugins that bundle different copies share each registry through a versioned `Symbol.for` key, the patched code calls it once however many plugins carry the patches, each entry renders in a `Boundary`, and each entry goes when its plugin stops.
 
 ## 0.2.1
 

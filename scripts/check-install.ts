@@ -36,6 +36,7 @@ import { accounts, DiscordApiError, discord, format, PluginPermissionError } fro
 import { defineNative } from "${name}/native";
 import { type ChangeSource, currentUserId, stores, subscribe, useStore } from "${name}/stores";
 import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
+import { boundary, chatBar, messages, state, useValue } from "${name}/ui";
 import { fetchJson, isRecord, sleep } from "${name}/util";
 
 const native = defineNative({ add: (a: number, b: number) => a + b });
@@ -49,13 +50,18 @@ export async function run() {
     mist.ctx.onDispose(subscribe([stores.presence, stores.sessions], () => { }));
     const text: string | undefined = mist.safe((line: { text?: string; }) => line.text!.trim(), line => line.text)({});
     const source: ChangeSource = { addChangeListener() { }, removeChangeListener() { } };
+    const count = state(0);
+    mist.ctx.onDispose(subscribe(count, () => { }));
+    messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(); });
+    // @ts-expect-error a draft's content is a string
+    messages.beforeEdit(mist, "bad", draft => { draft.content = draft.message.id.length; });
     const api = discord(mist);
     for await (const message of api.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
     // @ts-expect-error a page goes from before or from after, not both
     api.messages("1", { before: "1", after: "2" });
     const me: unknown = await discord("check").rest.get("/users/@me");
     const when: string = format.ago(Date.now());
-    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, PluginPermissionError, me, when];
+    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, PluginPermissionError, me, when, boundary, useValue, chatBar.patches];
 }
 export function test() {
     const evi = fakeEvi();
@@ -117,7 +123,8 @@ export default mist.define({ async start() { await sleep(10); } });
     else {
         const code = await built.outputs[0].text();
         const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
-        for (const unused of ["native.js", "stores.js", "bus.js", "discord.js", "testing.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
+        for (const unused of ["native.js", "stores.js", "bus.js", "discord.js", "testing.js", "ui.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
+        for (const unused of modules.filter(m => m.startsWith("ui/"))) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
         // HttpError stays: mist.native rebuilds one thrown by the native side
         for (const unused of ["function fetchJson", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
         if (!code.includes("function createMist") || !code.includes("function sleep")) problems.push("the bundle lost createMist or sleep");

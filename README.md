@@ -10,6 +10,7 @@ mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plug
 - Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, a bus between plugins, and `mist.storage`, a key-value store in IndexedDB for each plugin and, if you want, each account.
 - `mist.define` checks the plugin's patches. A `$self` name in a patch that the definition has no function for is a warning in the log and in `mist status`, not a `TypeError` inside Discord's code.
 - Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port. It also prints Flux actions as they are dispatched, reads Flux stores, and shows the layout of an element and the CSS rules that set it.
+- Plugins can add UI to Discord's. `@aurologic/mist-api/ui` has shared registries for chat bar buttons, hover bar buttons, UI under messages, and listeners before a message is sent or edited, each entry inside an error boundary.
 - Plugins can be unit tested without Discord. `@aurologic/mist-api/testing` has a fake plugin context, a fake Flux store, and a fake `@evi/api` module for any test runner's module mock.
 
 It is a general library for anyone who writes Evi plugins. Evi's build bundles everything a plugin imports except `@evi/api`, React, and `electron`, so each plugin carries its own copy of mist-api. State that plugins share, such as the debug registry and the bus, lives on `globalThis` under versioned `Symbol.for` keys, so copies of different versions work together.
@@ -196,6 +197,28 @@ export default mist.define({
 
 Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. `discord(mist)` holds the plugin's requests to its declaration, by the same rules Evi applies to its `fetch`. [Discord](docs/discord.md) lists what each part needs.
 
+## Add UI to Discord's
+
+`@aurologic/mist-api/ui` adds a plugin's UI to Discord's. It has buttons in the chat bar and in the hover bar of messages, UI under messages, and listeners that can change or stop a message before it is sent or edited. Plugins that bundle different copies of mist-api share each registry, and each entry goes when its plugin stops. Each entry renders inside an error boundary, so UI that throws shows a small notice and leaves Discord's UI working. The subpath also has `state` and `useValue` for state that a plugin's UI shares, and `host` for a mount point that keeps working across hot reloads.
+
+```tsx
+import { chatBar, ChatBarButton, messages } from "@aurologic/mist-api/ui";
+
+export default mist.define({
+	patches: [...chatBar.patches, ...messages.patches],
+	start() {
+		chatBar.add(mist, "hello", ({ channel }) => (
+			<ChatBarButton label="Say hello" onClick={() => mist.log.info("hello from", channel.id)}>Hi</ChatBarButton>
+		));
+		messages.beforeSend(mist, "no-shouting", draft => {
+			if (draft.content === draft.content.toUpperCase()) return { cancel: true };
+		});
+	},
+});
+```
+
+The registries need Discord code that mist-api patches, so spread their `patches` into the plugin's own. [UI](docs/ui.md) covers each part.
+
 ## Debug a plugin over CDP
 
 The `mist` CLI talks to Discord over its debugging port. It runs on Node 22 or later. From npm, run it with `npx -p @aurologic/mist-api mist`, which works whether or not it's installed. Name the package with `-p`: a bare `npx mist` outside the install folder downloads an unrelated npm package called `mist`. From a checkout, run the built file, or run the source on Node 22.18 or later or on Bun:
@@ -291,6 +314,7 @@ The CLI shows the page's logs, calls, and values whole for every plugin. `mist c
 - [Util](docs/util.md) covers `isRecord`, `sleep`, `fetchWithTimeout`, `fetchJson`, `HttpError`, and the `DiscordNative` types (`@aurologic/mist-api/util`).
 - [Discord](docs/discord.md) covers accounts, Discord's API, navigation, avatars, the clipboard, formatting in Discord's language, and the message box (`@aurologic/mist-api/discord`).
 - [Bus](docs/bus.md) covers channels and slots between plugins (`@aurologic/mist-api/bus`).
+- [UI](docs/ui.md) covers the error boundary, `state`, `host`, and the chat bar, hover bar, message accessory and message listener registries (`@aurologic/mist-api/ui`).
 - [Testing](docs/testing.md) covers the test doubles for a plugin's unit tests (`@aurologic/mist-api/testing`).
 - [CLI](docs/cli.md) lists every `mist` command and flag.
 - [Security model](docs/security.md) explains the debug gate.

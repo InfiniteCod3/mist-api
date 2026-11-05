@@ -53,6 +53,11 @@
             "import": "./dist/testing.js",
             "default": "./dist/testing.js"
         },
+        "./ui": {
+            "types": "./dist/ui.d.ts",
+            "import": "./dist/ui.js",
+            "default": "./dist/ui.js"
+        },
         "./package.json": "./package.json"
     },
     "main": "./dist/index.js",

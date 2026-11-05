@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -34,8 +34,24 @@ mock.module("@evi/api", () => ({
     findAll: (filter: (v: unknown) => boolean) => exportsOnPage.filter(v => { try { return filter(v); } catch { return false; } }),
 }));
 
-const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, whenConnected } = await import("../src/discord");
+const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, whenConnected } = await import("../src/discord");
 const { isDiscordClient } = await import("../src/discord/rest");
+const { createMist } = await import("../src/index");
+
+/** Evi's plugins, by id: each one's manifest permissions. Absent from Evi.plugins when undefined. */
+let declarations: Record<string, unknown> | undefined;
+const pageGlobals = globalThis as { Evi?: unknown; };
+const eviBefore = pageGlobals.Evi;
+beforeEach(() => {
+    declarations = undefined;
+    pageGlobals.Evi = { plugins: { get: (id: string) => declarations && id in declarations ? { manifest: { id, permissions: declarations[id] } } : undefined } };
+});
+afterAll(() => {
+    pageGlobals.Evi = eviBefore;
+});
+
+/** Not declared in Evi: held to nothing */
+const api = discord("t-discord");
 
 const ME = "100000000000000001", ALT = "100000000000000002";
 const userStore = (id: string | undefined) => ({ getCurrentUser: () => id ? { id, username: "me" } : undefined });
@@ -184,8 +200,8 @@ test("Discord's API client is found and the superagent under it isn't", () => {
 test("rest returns the answer's body and hands Discord's client the path, query, body and signal", async () => {
     serve(() => ({ ok: true, status: 200, body: { id: "1" } }));
     const signal = new AbortController().signal;
-    expect(await discord.rest.get("/users/@me", { query: { limit: 1 }, signal })).toEqual({ id: "1" });
-    await discord.rest.del("/channels/1/pins/2", { reason: "cleanup" });
+    expect(await api.rest.get("/users/@me", { query: { limit: 1 }, signal })).toEqual({ id: "1" });
+    await api.rest.del("/channels/1/pins/2", { reason: "cleanup" });
     expect(requests).toEqual([
         { method: "get", request: { url: "/users/@me", query: { limit: 1 }, body: undefined, headers: undefined, reason: undefined, signal, rejectWithError: false } },
         { method: "del", request: { url: "/channels/1/pins/2", query: undefined, body: undefined, headers: undefined, reason: "cleanup", signal: undefined, rejectWithError: false } },
@@ -199,17 +215,17 @@ test("a refused request throws a DiscordApiError with its status, code and retry
         throw { ok: false, status: 403, body: { message: "Missing Access", code: 50001 } };
     });
 
-    const forbidden = await discord.rest.patch("/channels/1", { body: { name: "x" } }).catch(e => e);
+    const forbidden = await api.rest.patch("/channels/1", { body: { name: "x" } }).catch(e => e);
     expect(forbidden).toBeInstanceOf(DiscordApiError);
     expect(forbidden).toMatchObject({ status: 403, code: 50001, retryAfter: undefined, method: "PATCH", path: "/channels/1", message: "PATCH /channels/1: 403 Missing Access (code 50001)" });
 
-    expect(await discord.rest.get("/limited").catch(e => e)).toMatchObject({ status: 429, retryAfter: 2, code: 0 });
-    expect(await discord.rest.get("/offline").catch(e => e)).toMatchObject({ name: "DiscordApiError", status: 0, message: "GET /offline: no answer Request has been terminated" });
+    expect(await api.rest.get("/limited").catch(e => e)).toMatchObject({ status: 429, retryAfter: 2, code: 0 });
+    expect(await api.rest.get("/offline").catch(e => e)).toMatchObject({ name: "DiscordApiError", status: 0, message: "GET /offline: no answer Request has been terminated" });
 });
 
 test("rest refuses a URL that isn't a path on Discord's API before anything is sent", async () => {
     serve(() => ({}));
-    for (const url of ["https://example.com/x", "//example.com/x", "users/@me"]) await expect(discord.rest.get(url)).rejects.toThrow(TypeError);
+    for (const url of ["https://example.com/x", "//example.com/x", "users/@me"]) await expect(api.rest.get(url)).rejects.toThrow(TypeError);
     expect(requests).toHaveLength(0);
 });
 
@@ -234,28 +250,119 @@ const collect = async (pages: AsyncIterable<{ id: string; }>) => {
 
 test("messages pages from the newest back to the first, newest first, a hundred at a time", async () => {
     serveChannel(250);
-    const ids = await collect(discord.messages("9"));
+    const ids = await collect(api.messages("9"));
     expect(ids).toEqual(Array.from({ length: 250 }, (_, i) => 250 - i));
     expect(requests.map(r => r.request.query)).toEqual([{ limit: 100 }, { limit: 100, before: "151" }, { limit: 100, before: "51" }]);
 });
 
 test("messages from after an id pages forward, oldest first, and stops at the limit", async () => {
     serveChannel(250);
-    expect(await collect(discord.messages("9", { after: "10", limit: 120 }))).toEqual(Array.from({ length: 120 }, (_, i) => 11 + i));
+    expect(await collect(api.messages("9", { after: "10", limit: 120 }))).toEqual(Array.from({ length: 120 }, (_, i) => 11 + i));
     expect(requests.map(r => r.request.query)).toEqual([{ limit: 100, after: "10" }, { limit: 20, after: "110" }]);
-    expect(await collect(discord.messages("9", { before: "5" }))).toEqual([4, 3, 2, 1]);
+    expect(await collect(api.messages("9", { before: "5" }))).toEqual([4, 3, 2, 1]);
 });
 
 test("messages waits out a 429 and asks for the same page again", async () => {
     serveChannel(150, new Set([2, 3]));
-    expect(await collect(discord.messages("9"))).toHaveLength(150);
+    expect(await collect(api.messages("9"))).toHaveLength(150);
     expect(requests.map(r => r.request.query.before)).toEqual([undefined, "51", "51", "51"]);
 });
 
 test("messages skips entries that aren't messages and refuses both before and after", async () => {
     serve(() => ({ ok: true, status: 200, body: [{ id: "2", channel_id: "9", content: "ok", timestamp: "t", author: { id: "5", username: "a" } }, { id: "1" }, null] }));
-    expect(await collect(discord.messages("9"))).toEqual([2]);
-    await expect(collect(discord.messages("9", { before: "1", after: "2" } as never))).rejects.toThrow(TypeError);
+    expect(await collect(api.messages("9"))).toEqual([2]);
+    await expect(collect(api.messages("9", { before: "1", after: "2" } as never))).rejects.toThrow(TypeError);
+});
+
+const ok = () => ({ ok: true, status: 200, body: [] });
+/** What a plugin that declares `permissions` gets from rest */
+function declared(permissions: Record<string, unknown>) {
+    declarations = { "t-declared": permissions };
+    serve(ok);
+    return discord("t-declared");
+}
+const refusal = (promise: Promise<unknown>) => promise.then(() => undefined, (e: unknown) => e);
+
+test("a plugin that declares permissions without discord.com is refused before anything is sent", async () => {
+    const { rest } = declared({ network: ["api.example.com"], readMessages: true, sendMessages: true, changeSettings: true });
+    const err = await refusal(rest.get("/users/@me"));
+    expect(err).toBeInstanceOf(PluginPermissionError);
+    expect(err).toMatchObject({ name: "PluginPermissionError", plugin: "t-declared", permission: "network", target: "discord.com", message: "t-declared can't contact discord.com: its manifest doesn't list it in permissions.network" });
+    expect(await refusal(declared({}).rest.get("/users/@me"))).toMatchObject({ permission: "network" });
+    // A site that isn't one (no dot) is dropped, not read as covering every .com
+    expect(await refusal(declared({ network: ["com"] }).rest.get("/users/@me"))).toMatchObject({ permission: "network" });
+    expect(requests).toHaveLength(0);
+});
+
+test("a declared site covers its subdomains and reads in any case, as in Evi", async () => {
+    await declared({ network: ["Discord.com"] }).rest.get("/users/@me");
+    expect(requests).toHaveLength(1);
+});
+
+test("GET needs only network, even on a write endpoint", async () => {
+    const { rest } = declared({ network: ["discord.com"] });
+    await rest.get("/channels/1/messages");
+    await rest.get("/users/@me/settings-proto/1");
+    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/messages", "/users/@me/settings-proto/1"]);
+});
+
+test("POST to a channel's messages is refused without sendMessages and sent with it", async () => {
+    const err = await refusal(declared({ network: ["discord.com"] }).rest.post("/channels/1/messages", { body: { content: "hi" } }));
+    expect(err).toMatchObject({ name: "PluginPermissionError", permission: "sendMessages", message: "t-declared can't send messages (discord.com): its manifest doesn't declare permissions.sendMessages" });
+    expect(requests).toHaveLength(0);
+
+    await declared({ network: ["discord.com"], sendMessages: true }).rest.post("/channels/1/messages", { body: { content: "hi" } });
+    expect(requests).toHaveLength(1);
+});
+
+test("PATCH to settings-proto is refused without changeSettings", async () => {
+    const { rest } = declared({ network: ["discord.com"], sendMessages: true });
+    expect(await refusal(rest.patch("/users/@me/settings-proto/1", { body: {} }))).toMatchObject({ permission: "changeSettings", message: "t-declared can't change settings (discord.com): its manifest doesn't declare permissions.changeSettings" });
+    expect(requests).toHaveLength(0);
+    await declared({ network: ["discord.com"], changeSettings: true }).rest.patch("/users/@me/settings-proto/1", { body: {} });
+    expect(requests).toHaveLength(1);
+});
+
+test("a path is read as Discord's API reads it: escapes, repeated and trailing slashes, a query, a backslash", async () => {
+    const { rest } = declared({ network: ["discord.com"] });
+    for (const path of ["/users/%40me", "/users/%40me/settings-proto/1/", "/users//@me/profile", "/channels/1/messages?x=1", "/channels/1/messages#x", "/\channels/1/messages"]) {
+        expect({ path, refused: await refusal(rest.patch(path)) }).toMatchObject({ path, refused: { name: "PluginPermissionError" } });
+    }
+    // One that can't be decoded could be any of them
+    expect(await refusal(rest.post("/users/%E0%A4%A"))).toMatchObject({ permission: "sendMessages" });
+    expect(requests).toHaveLength(0);
+    await rest.patch("/channels/1");
+    expect(requests).toHaveLength(1);
+});
+
+test("messages is refused without readMessages, before any page is asked for", async () => {
+    const err = await refusal(collect(declared({ network: ["discord.com"] }).messages("9")));
+    expect(err).toMatchObject({ name: "PluginPermissionError", permission: "readMessages", target: "/channels/9/messages", message: "t-declared can't read messages (/channels/9/messages): its manifest doesn't declare permissions.readMessages" });
+    expect(await refusal(collect(declared({ readMessages: true }).messages("9")))).toMatchObject({ permission: "network" });
+    expect(requests).toHaveLength(0);
+
+    expect(await collect(declared({ network: ["discord.com"], readMessages: true }).messages("9"))).toEqual([]);
+    expect(requests).toHaveLength(1);
+});
+
+test("a plugin that declares nothing is allowed everything, as Evi allows it", async () => {
+    declarations = { "t-undeclared": undefined };
+    serve(ok);
+    const plugin = discord("t-undeclared");
+    await plugin.rest.post("/channels/1/messages");
+    await plugin.rest.patch("/users/@me/settings-proto/1");
+    await collect(plugin.messages("9"));
+    expect(requests).toHaveLength(3);
+});
+
+test("discord takes the plugin's mist object, and refuses what has no id", async () => {
+    const mist = createMist("t-declared");
+    declarations = { "t-declared": { network: ["discord.com"] } };
+    serve(ok);
+    expect(await refusal(discord(mist).rest.post("/channels/1/messages"))).toMatchObject({ plugin: "t-declared", permission: "sendMessages" });
+    expect(() => discord("")).toThrow(TypeError);
+    expect(() => discord({} as never)).toThrow(TypeError);
+    expect(() => discord(null as never)).toThrow(TypeError);
 });
 
 test("navigate goes through Discord's router and refuses what isn't a path", () => {

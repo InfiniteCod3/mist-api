@@ -3,8 +3,12 @@
 `@aurologic/mist-api/discord` reaches the parts of Discord's app that many plugins rebuild for themselves. It covers the saved accounts and account switches, Discord's own API client, Discord's router, avatars, the clipboard, dates and durations in Discord's language, and the message box. It runs on the page side only, because it imports from `@evi/api`.
 
 ```ts
-import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, whenConnected } from "@aurologic/mist-api/discord";
+import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, whenConnected } from "@aurologic/mist-api/discord";
+
+const api = discord(mist);
 ```
+
+`discord(plugin)` takes the plugin's mist object (from `createMist`) or its id, and returns `{ rest, messages }` for that plugin. It must know which plugin is asking, to hold the plugin's requests to its manifest. It throws a `TypeError` for a value with no id.
 
 A plugin's bundle carries only the parts it imports.
 
@@ -14,13 +18,26 @@ Evi holds a plugin to the `permissions` in its `manifest.json`. Evi's [plugin gu
 
 | You use | Declare |
 | --- | --- |
-| `discord.rest.get` and `discord.messages` on message endpoints, such as `/channels/<id>/messages` | `"network": ["discord.com"]` and `"readMessages": true` |
-| `discord.rest` to post, edit, or delete messages, or to use interactions, webhooks, or new threads | `"network": ["discord.com"]` and `"sendMessages": true` |
-| `discord.rest` to change your account, profile, or settings (`/users/@me...`) | `"network": ["discord.com"]` and `"changeSettings": true` |
-| `discord.rest` on any other endpoint | `"network": ["discord.com"]` |
+| `api.messages` | `"network": ["discord.com"]` and `"readMessages": true` |
+| `api.rest.get` on message endpoints, such as `/channels/<id>/messages` | `"network": ["discord.com"]` and `"readMessages": true` |
+| `api.rest` to post, edit, or delete messages, or to use interactions, webhooks, or new threads | `"network": ["discord.com"]` and `"sendMessages": true` |
+| `api.rest` to change your account, profile, or settings (`/users/@me...`) | `"network": ["discord.com"]` and `"changeSettings": true` |
+| `api.rest` on any other endpoint | `"network": ["discord.com"]` |
 | `accounts`, `whenConnected`, `navigate`, `avatarUrl`, `copy`, `format`, `chat` | Nothing |
 
-`discord.rest` and `discord.messages` send requests through Discord's own API client, not the plugin's `fetch`. Evi checks only the plugin's own `fetch`, `XMLHttpRequest`, `WebSocket`, and `EventSource`, so it can't stop these requests at run time. Declare them anyway. Store reviewers compare the declaration with what the code does, and the store shows the declaration to users.
+`api.rest` and `api.messages` send requests through Discord's own API client, not the plugin's `fetch`, so Evi's guard doesn't see them. mist holds them to the plugin's declaration by the rules Evi applies to the plugin's own `fetch`:
+
+- A plugin whose manifest has no `permissions` isn't held to anything, as in Evi.
+- Every request needs `network` to cover `discord.com`. A listed host covers its subdomains.
+- A `POST`, `PUT`, `PATCH`, or `DELETE` to a message, thread, interaction, or webhook endpoint needs `sendMessages`.
+- A `POST`, `PUT`, `PATCH`, or `DELETE` to `/users/@me`, its settings, profile, consent, or connections needs `changeSettings`.
+- `api.messages` needs `readMessages`. Evi doesn't check `readMessages` for a `GET`, so mist doesn't check it for `api.rest.get` either. Declare it anyway.
+
+mist reads the path as Discord's API does. It decodes `%`-escapes, so `/users/%40me` is `/users/@me`, and it drops repeated and trailing slashes, the query, and the fragment. A path it can't decode needs every flag. mist reads the declaration from `Evi.plugins` at each request, so it follows an update.
+
+A refused request throws a `PluginPermissionError` before anything is sent. Its `permission` names what to declare, and its `message` matches Evi's, as in `example can't send messages (discord.com): its manifest doesn't declare permissions.sendMessages`.
+
+These checks mirror Evi's guard. They catch what an honest plugin forgot to declare. They don't make the declaration a sandbox, because plugin code can reach Discord's client in other ways. Store reviewers still read the code and compare the declaration with what it does, and the store shows the declaration to users.
 
 Some parts need nothing in `permissions` but still show on the plugin's store page and in its review:
 
@@ -129,7 +146,7 @@ async start(ctx) {
 },
 ```
 
-## discord.rest
+## api.rest
 
 ```ts
 interface RestOptions {
@@ -140,16 +157,16 @@ interface RestOptions {
 	signal?: AbortSignal;
 }
 
-discord.rest.get(path: string, options?: RestOptions): Promise<unknown>;
-discord.rest.post(path: string, options?: RestOptions): Promise<unknown>;
-discord.rest.put(path: string, options?: RestOptions): Promise<unknown>;
-discord.rest.patch(path: string, options?: RestOptions): Promise<unknown>;
-discord.rest.del(path: string, options?: RestOptions): Promise<unknown>;
+api.rest.get(path: string, options?: RestOptions): Promise<unknown>;
+api.rest.post(path: string, options?: RestOptions): Promise<unknown>;
+api.rest.put(path: string, options?: RestOptions): Promise<unknown>;
+api.rest.patch(path: string, options?: RestOptions): Promise<unknown>;
+api.rest.del(path: string, options?: RestOptions): Promise<unknown>;
 ```
 
 Sends a request to Discord's API with Discord's own API client, as the account that is signed in. The client adds the login, the API version, and Discord's headers. It also holds back a request to a path that answered 429 until the wait is over. The plugin never sees the login.
 
-`path` is the path after `/api/v<n>`, such as `/users/@me` or `/channels/123/messages`. A path that doesn't start with exactly one `/` throws a `TypeError` before anything is sent, because Discord's client would sign a full URL to another site too.
+`path` is the path after `/api/v<n>`, such as `/users/@me` or `/channels/123/messages`. A path that doesn't start with exactly one `/` throws a `TypeError` before anything is sent, because Discord's client would sign a full URL to another site too. A request the manifest doesn't declare throws a `PluginPermissionError`, also before anything is sent.
 
 The result is the parsed body of a 2xx answer, or `undefined` when there is none. It is `unknown` on purpose, so check it before use.
 
@@ -162,7 +179,7 @@ The result is the parsed body of a 2xx answer, or `undefined` when there is none
 | `signal` | Aborts the request. The promise then rejects with `signal.reason`. |
 
 ```ts
-const pins = await discord.rest.get(`/channels/${channelId}/pins`);
+const pins = await api.rest.get(`/channels/${channelId}/pins`);
 if (!Array.isArray(pins)) throw new Error("Unexpected answer");
 ```
 
@@ -179,7 +196,7 @@ class DiscordApiError extends Error {
 }
 ```
 
-What `discord.rest` and `discord.messages` throw for an answer outside 2xx. `name` is `"DiscordApiError"`.
+What `api.rest` and `api.messages` throw for an answer outside 2xx. `name` is `"DiscordApiError"`.
 
 | Field | Value |
 | --- | --- |
@@ -194,14 +211,26 @@ What `discord.rest` and `discord.messages` throw for an answer outside 2xx. `nam
 
 ```ts
 try {
-	await discord.rest.get(`/channels/${channelId}/messages`, { query: { limit: 1 } });
+	await api.rest.get(`/channels/${channelId}/messages`, { query: { limit: 1 } });
 } catch (err) {
 	if (err instanceof DiscordApiError && err.code === 50001) return null;
 	throw err;
 }
 ```
 
-## discord.messages
+## PluginPermissionError
+
+```ts
+class PluginPermissionError extends Error {
+	readonly plugin: string;
+	readonly permission: "network" | "readMessages" | "sendMessages" | "changeSettings";
+	readonly target: string;
+}
+```
+
+What `api.rest` and `api.messages` throw for a request the plugin's manifest doesn't declare, before anything is sent. `name` is `"PluginPermissionError"`, as for Evi's own refusals. `target` is `discord.com` for a request, and the channel's messages path for `api.messages`.
+
+## api.messages
 
 ```ts
 interface ApiMessage {
@@ -218,7 +247,7 @@ type MessagesOptions = ({ before?: string; } | { after: string; }) & {
 	signal?: AbortSignal;
 };
 
-discord.messages(channelId: string, options?: MessagesOptions): AsyncGenerator<ApiMessage>;
+api.messages(channelId: string, options?: MessagesOptions): AsyncGenerator<ApiMessage>;
 ```
 
 A channel's messages, one at a time, fetched in pages of up to 100. Use it with `for await`.
@@ -235,7 +264,7 @@ The fields in `ApiMessage` are checked. An entry that doesn't have them is skipp
 
 ```ts
 const recent: string[] = [];
-for await (const message of discord.messages(channelId, { limit: 300 })) {
+for await (const message of api.messages(channelId, { limit: 300 })) {
 	if (message.author.id === me) recent.push(message.content);
 }
 ```

@@ -1,6 +1,7 @@
 import { find } from "@evi/api";
 
 import { isRecord, sleep } from "../util.ts";
+import { checkApiRequest, need } from "./permissions.ts";
 
 type Method = "get" | "post" | "put" | "patch" | "del";
 
@@ -79,8 +80,10 @@ export class DiscordApiError extends Error {
 
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
+const verbOf = (method: Method) => method === "del" ? "DELETE" : method.toUpperCase();
+
 export function toApiError(method: Method, path: string, failure: unknown): DiscordApiError {
-    const verb = method === "del" ? "DELETE" : method.toUpperCase();
+    const verb = verbOf(method);
     if (!isRecord(failure) || typeof failure.status !== "number") {
         return new DiscordApiError({ method: verb, path, status: 0, detail: failure instanceof Error ? failure.message : String(failure), cause: failure });
     }
@@ -97,11 +100,12 @@ export function toApiError(method: Method, path: string, failure: unknown): Disc
     });
 }
 
-async function request(method: Method, path: string, options: RestOptions = {}): Promise<unknown> {
+async function request(plugin: string, method: Method, path: string, options: RestOptions = {}): Promise<unknown> {
     // Discord's client signs any URL it's given: an absolute one would carry the login elsewhere
     if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) {
         throw new TypeError(`A Discord API path starts with one /, as in "/users/@me", got ${JSON.stringify(path)}`);
     }
+    checkApiRequest(plugin, verbOf(method), path);
     const { query, body, headers, reason, signal } = options;
     signal?.throwIfAborted();
     try {
@@ -113,13 +117,15 @@ async function request(method: Method, path: string, options: RestOptions = {}):
     }
 }
 
-export const rest = {
-    get: (path: string, options?: RestOptions) => request("get", path, options),
-    post: (path: string, options?: RestOptions) => request("post", path, options),
-    put: (path: string, options?: RestOptions) => request("put", path, options),
-    patch: (path: string, options?: RestOptions) => request("patch", path, options),
-    del: (path: string, options?: RestOptions) => request("del", path, options),
-};
+export type Rest = Record<Method, (path: string, options?: RestOptions) => Promise<unknown>>;
+
+export const restFor = (plugin: string): Rest => ({
+    get: (path, options) => request(plugin, "get", path, options),
+    post: (path, options) => request(plugin, "post", path, options),
+    put: (path, options) => request(plugin, "put", path, options),
+    patch: (path, options) => request(plugin, "patch", path, options),
+    del: (path, options) => request(plugin, "del", path, options),
+});
 
 /** A message as Discord's API gives it. The fields listed are checked; the rest are as Discord sent them. */
 export interface ApiMessage {
@@ -155,10 +161,10 @@ const PAGE = 100;
 /** 429s in a row on one page before giving up */
 const RATE_LIMIT_TRIES = 5;
 
-async function page(channelId: string, query: Record<string, string | number>, signal: AbortSignal | undefined): Promise<unknown[]> {
+async function page(plugin: string, channelId: string, query: Record<string, string | number>, signal: AbortSignal | undefined): Promise<unknown[]> {
     for (let tries = 1; ; tries++) {
         try {
-            const body = await rest.get(`/channels/${channelId}/messages`, { query, signal });
+            const body = await request(plugin, "get", `/channels/${channelId}/messages`, { query, signal });
             return Array.isArray(body) ? body : [];
         } catch (err) {
             if (!(err instanceof DiscordApiError) || err.status !== 429 || tries >= RATE_LIMIT_TRIES) throw err;
@@ -171,8 +177,9 @@ async function page(channelId: string, query: Record<string, string | number>, s
  * The channel's messages, a page at a time. Newest first from the latest, or from before `before`;
  * oldest first from after `after`. A 429 waits as long as Discord says, then asks again.
  */
-export async function* messages(channelId: string, options: MessagesOptions = {}): AsyncGenerator<ApiMessage, void, undefined> {
+export async function* messages(plugin: string, channelId: string, options: MessagesOptions = {}): AsyncGenerator<ApiMessage, void, undefined> {
     if (!isSnowflake(channelId)) throw new TypeError(`A channel id is a Discord id, got ${JSON.stringify(channelId)}`);
+    need(plugin, "readMessages", `/channels/${channelId}/messages`);
     const { before, after, signal, limit = Infinity } = options;
     if (before !== undefined && after !== undefined) throw new TypeError("Page from before or from after, not both");
     const forward = after !== undefined;
@@ -182,7 +189,7 @@ export async function* messages(channelId: string, options: MessagesOptions = {}
     while (left > 0) {
         signal?.throwIfAborted();
         const size = Math.min(PAGE, left);
-        const raw = await page(channelId, cursor === undefined ? { limit: size } : { limit: size, [forward ? "after" : "before"]: cursor }, signal);
+        const raw = await page(plugin, channelId, cursor === undefined ? { limit: size } : { limit: size, [forward ? "after" : "before"]: cursor }, signal);
         const found = raw.filter(isMessage).sort(byId);
         if (!forward) found.reverse();
         for (const message of found) {

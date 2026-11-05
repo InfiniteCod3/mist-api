@@ -174,9 +174,11 @@ Run `bun run dev` in your Evi checkout and turn the plugin on. Evi's [plugin gui
 ```ts
 import { accounts, chat, discord, format } from "@aurologic/mist-api/discord";
 
+const api = discord(mist);
+
 export async function showRecent(channelId: string) {
 	const lines: string[] = [];
-	for await (const message of discord.messages(channelId, { limit: 200 })) {
+	for await (const message of api.messages(channelId, { limit: 200 })) {
 		lines.push(`[${format.date(message.timestamp, { timeStyle: "short" })}] ${message.author.username}: ${message.content}`);
 	}
 	chat.localMessage(`Read ${lines.length} messages.`, channelId);
@@ -190,7 +192,7 @@ export default mist.define({
 });
 ```
 
-Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. [Discord](docs/discord.md) lists what each part needs.
+Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. `discord(mist)` holds the plugin's requests to its declaration, by the same rules Evi applies to its `fetch`. [Discord](docs/discord.md) lists what each part needs.
 
 ## Debug a plugin over CDP
 

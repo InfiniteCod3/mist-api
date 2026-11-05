@@ -32,7 +32,7 @@ try {
 import type { SettingsSchema } from "@evi/api";
 import { createMist, MIST_VERSION } from "${name}";
 import { channel, slot } from "${name}/bus";
-import { accounts, DiscordApiError, discord, format } from "${name}/discord";
+import { accounts, DiscordApiError, discord, format, PluginPermissionError } from "${name}/discord";
 import { defineNative } from "${name}/native";
 import { type ChangeSource, currentUserId, stores, subscribe, useStore } from "${name}/stores";
 import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
@@ -49,11 +49,13 @@ export async function run() {
     mist.ctx.onDispose(subscribe([stores.presence, stores.sessions], () => { }));
     const text: string | undefined = mist.safe((line: { text?: string; }) => line.text!.trim(), line => line.text)({});
     const source: ChangeSource = { addChangeListener() { }, removeChangeListener() { } };
-    for await (const message of discord.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
+    const api = discord(mist);
+    for await (const message of api.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
     // @ts-expect-error a page goes from before or from after, not both
-    discord.messages("1", { before: "1", after: "2" });
+    api.messages("1", { before: "1", after: "2" });
+    const me: unknown = await discord("check").rest.get("/users/@me");
     const when: string = format.ago(Date.now());
-    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, when];
+    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, PluginPermissionError, me, when];
 }
 export function test() {
     const evi = fakeEvi();

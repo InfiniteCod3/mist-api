@@ -118,8 +118,22 @@ export default mist.define({ async start() { await sleep(10); } });
         const code = await built.outputs[0].text();
         const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
         for (const unused of ["native.js", "stores.js", "bus.js", "discord.js", "testing.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
-        for (const unused of ["function fetchJson", "class HttpError", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
+        // HttpError stays: mist.native rebuilds one thrown by the native side
+        for (const unused of ["function fetchJson", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
         if (!code.includes("function createMist") || !code.includes("function sleep")) problems.push("the bundle lost createMist or sleep");
+    }
+
+    writeFileSync(join(app, "plugin", "native.ts"), `
+import { defineNative } from "${name}/native";
+export default defineNative({ add: (a: number, b: number) => a + b });
+`);
+    // As Evi's build bundles a plugin's native side. Evi's review flags programs, files and Electron in native.js.
+    const nativeBuilt = await Bun.build({ entrypoints: [join(app, "plugin", "native.ts")], target: "node", format: "cjs", external: ["electron"] });
+    if (!nativeBuilt.success) problems.push(`bundling a native side failed: ${nativeBuilt.logs.join(" ")}`);
+    else {
+        const code = await nativeBuilt.outputs[0].text();
+        for (const unused of ["child_process", "electron", "safeStorage", "function jsonFile"]) if (code.includes(unused)) problems.push(`the native bundle carries ${unused}, which a native side using only defineNative doesn't use`);
+        if (!code.includes("function defineNative")) problems.push("the native bundle lost defineNative");
     }
 } finally {
     rmSync(dir, { recursive: true, force: true });

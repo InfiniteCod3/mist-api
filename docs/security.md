@@ -84,6 +84,15 @@ Hostile page code can do these things. Each follows from the code above:
 
 Closing the stopped-plugin window needs a key per plugin that only that plugin gets, which page code never sees. Evi's plugin API has no such key today.
 
+## Native calls from the page
+
+Evi passes each native call with data from Discord's page, and the page is shared with Discord's code and every other plugin. A plugin's native side treats what comes from its page side as untrusted. mist-api's native features follow that rule:
+
+- The call protocol isn't a security boundary. The call mark only tells `defineNative` to answer with an envelope and which call `__mist_abort` names. A page that sends a forged mark, or none, gets the same methods run with the same arguments. `__mist_abort` names a call by a random id that the page side made for it, and aborting only aborts that call's `this.signal`. Errors that cross to the page carry the `name`, `message`, `code`, `data`, and `status` that the native code gave them, and no stack. The page records them for `mist calls`, so a native error shouldn't hold a secret.
+- A request's answer is page input. `nativeRequests` checks only that an answer has the envelope's shape and belongs to a request still waiting, and it accepts one answer per request. What the answer holds is whatever the page sent, so native code checks it before acting on it. [nativeRequests](native.md#nativerequests) says so where it's used.
+- Path grants keep page input from naming paths. `pathGrants` gives the page an opaque handle for a path the user picked in a dialog that main shows. Only native code turns a handle into a path, and a folder's handle reaches only paths inside that folder. Code that reaches the plugin's page side can use the handles that the page side has, but it can't make one for a path nobody picked. `resolveGrant` checks path text and doesn't resolve links.
+- Secrets stay in main. `secrets` encrypts with `safeStorage` into the plugin's own folder. That protects a copied file, not a running Discord: every native module can call `safeStorage` and read the file. `encrypted` is `false` when Electron falls back to Chromium's built-in key on Linux. A native method that returns a secret to the page hands it to every plugin there.
+
 ## What this doesn't protect
 
 The design keeps other plugins away from a plugin's capability and native side. It doesn't make the page a trusted place. These limits follow from the code:
@@ -92,7 +101,7 @@ The design keeps other plugins away from a plugin's capability and native side. 
 - The bus has no access control. Any plugin can read, set, and publish on any channel or slot.
 - A plugin that loads first can install a lying registry. The registry key is a `Symbol.for` key on `globalThis`, and the first copy to set it wins. A malicious plugin that sets it first, or that defines `window.Mist` first, can misreport the other plugins' handles to the CLI. It can't use that to reach another plugin's capability or native side, because each handle is made by the plugin's own copy and the capability is still only in that plugin's closure and its handle's private field.
 - A stopped plugin's handle can be replaced, as [What page code can still do](#what-page-code-can-still-do) describes.
-- Native modules share main. Every plugin's native side runs in Discord's main process with full access, so another plugin's native code can reach this plugin's native module and call `__mist_logs` or `__mist_events` itself.
+- Native modules share main. Every plugin's native side runs in Discord's main process with full access, so another plugin's native code can reach this plugin's native module and call any of its hidden `__mist_` methods itself, answer its requests, or read its `plugin-data` folder, its grants, and its secrets.
 - Anyone with the debugging port has everything. The port gives full control of Discord, including the account's token. That is why the gate opens on it, and why Discord should run without it when you aren't debugging.
 
 ## The debug report
@@ -104,3 +113,5 @@ The report doesn't reach the debug capability, so it never contains the open vie
 ## Version skew
 
 Each plugin bundles its own copy of mist-api, and copies of different versions share one registry. The registry only calls a handle's own methods, so it never needs to understand the records of a copy at another version. `MIST_VERSION` on each handle tells the CLI which copy made it. The registry key ends in `.v1`. A change that a registry from another copy couldn't handle would use a new key.
+
+A plugin's page side and native side can also be different versions, as while an author updates one of them. The page asks the native side's `__mist_protocol` before it sends a call mark, so an older or plain native side never sees one, and an older page never sends one. [How a call crosses IPC](native.md#how-a-call-crosses-ipc) lists each pairing.

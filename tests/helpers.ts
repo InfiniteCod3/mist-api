@@ -25,3 +25,20 @@ export const plainNative = (methods: Record<string, (...args: any[]) => unknown>
 
 /** Lets pending promise callbacks run */
 export const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+/**
+ * Evi's IPC to a native module: start and stop aren't callable, arguments and results are
+ * structured-cloned, and Electron turns a throw into a plain Error with a prefixed message.
+ */
+export function electronBridge(module: object, calls: { method: string; args: unknown[]; }[] = []): NativeImpl {
+    return async (method, ...args) => {
+        calls.push({ method, args });
+        const fn = (module as Record<string, unknown>)[method];
+        if (typeof fn !== "function" || method === "start" || method === "stop") throw new Error(`Error invoking remote method 'evi:plugin-native-call': Error: Plugin test has no native method ${method}`);
+        try {
+            return structuredClone(await fn.apply(module, structuredClone(args)));
+        } catch (err) {
+            throw new Error(`Error invoking remote method 'evi:plugin-native-call': ${err}`);
+        }
+    };
+}

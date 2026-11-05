@@ -1,0 +1,3 @@
+[test]
+# Electron's main-process module only exists inside Electron
+preload = ["./tests/electron.ts"]

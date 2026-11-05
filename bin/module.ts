@@ -3,15 +3,18 @@
  * (sourceURL evi://modules/<id>.js, src/renderer/patching/source.ts), and its diff against Discord's original.
  */
 import { CdpError, evaluate, type Listen, type Send } from "./cdp.ts";
-import { pageExpression } from "./page.ts";
+import { enableDebugger } from "./errors.ts";
 
 /** Where one patch's replacements match in the original source: what a change there is likely from */
 export interface PatchRanges { plugin: string; index: number; ranges: [number, number][]; }
 export interface ModuleInfo { id: string; original: string; loaded: boolean; patches: PatchRanges[]; }
 export type Found = { kind: "module"; module: ModuleInfo; } | { kind: "matches"; ids: string[]; total: number; } | { kind: "none"; };
 
-/** Page side. A query that is a module id reads that module; any other text finds the modules whose source has it. */
-function findModule(query: string, limit: number): Found {
+/**
+ * Page side. A query that is a module id reads that module; any other text finds the modules whose source has it.
+ * Patch ranges are measured on the source as Evi patches it, normalised as `normalize` does.
+ */
+function findModule(normalize: (code: string) => string, query: string, limit: number): Found {
     const E = (globalThis as any).Evi;
     const m = E.wreq?.m;
     if (!m) return { kind: "none" };
@@ -24,7 +27,7 @@ function findModule(query: string, limit: number): Found {
         if (ids.length !== 1) return ids.length ? { kind: "matches", ids: ids.slice(0, limit), total: ids.length } : { kind: "none" };
         id = ids[0];
     }
-    const original = source(id);
+    const original = normalize(source(id));
     const IDENT = "(?:[A-Za-z_$][\\w$]*)";
     const patches: PatchRanges[] = [];
     for (const p of E.diagnosePatches?.() ?? []) {
@@ -49,22 +52,24 @@ export async function patchedSource(send: Send, listen: Listen, id: string): Pro
     const url = `evi://modules/${id}.js`;
     let scriptId: string | null = null;
     const off = listen("Debugger.scriptParsed", p => { if (p.url === url) scriptId = p.scriptId; });
+    let stopDebugger = () => { };
     try {
-        await send("Debugger.enable");
-        await send("Debugger.setSkipAllPauses", { skip: true }).catch(() => { });
+        stopDebugger = await enableDebugger(send, listen);
         if (!scriptId) return null;
         const { scriptSource } = await send("Debugger.getScriptSource", { scriptId });
         return String(scriptSource).replace(/^0,/, "").replace(/\n\/\/# sourceURL=\S*\s*$/, "");
     } finally {
         off();
+        stopDebugger();
         await send("Debugger.disable").catch(() => { });
     }
 }
 
-export const findModuleIn = (send: Send, query: string, limit: number) => evaluate<Found>(send, pageExpression(findModule, [query, limit]));
+/** Evi's normalizeFactorySource (src/renderer/patching/source.ts): a method shorthand factory `123(e,t,n){…}` compiles as `function(e,t,n){…}` */
+const normalizeFactory = (code: string) => /^(?:function\b|async\b|\()/.test(code) ? code : code.replace(/^(?:[\w$]+|"(?:[^"\\]|\\.)*")(?=\s*\()/, "function");
 
-/** Evi's normalizeFactorySource: a method shorthand factory `123(e,t,n){…}` compiles as `function(e,t,n){…}` */
-export const normalizeFactory = (code: string) => /^(?:function\b|async\b|\()/.test(code) ? code : code.replace(/^(?:[\w$]+|"(?:[^"\\]|\\.)*")(?=\s*\()/, "function");
+export const findModuleIn = (send: Send, query: string, limit: number) =>
+    evaluate<Found>(send, `(${findModule})(${normalizeFactory}, ${JSON.stringify(query)}, ${JSON.stringify(limit)})`);
 
 const TOKEN = /[A-Za-z_$][\w$]*|\d+|\s+|[^]/g;
 export const tokens = (code: string) => code.match(TOKEN) ?? [];
@@ -184,14 +189,13 @@ export interface ModuleReport { id: string; loaded: boolean; patchedBy: string[]
 export async function readModule(send: Send, listen: Listen, query: string): Promise<ModuleReport> {
     const module = requireModule(await findModuleIn(send, query, 20), query);
     const patched = await patchedSource(send, listen, module.id);
-    const original = normalizeFactory(module.original);
-    const ops = patched === null ? null : diffTokens(tokens(original), tokens(patched));
+    const ops = patched === null ? null : diffTokens(tokens(module.original), tokens(patched));
     return {
         id: module.id,
         loaded: module.loaded,
         patchedBy: module.patches.map(p => `${p.plugin} #${p.index}`),
         patched,
-        original,
+        original: module.original,
         hunks: ops && hunks(ops, module.patches),
     };
 }

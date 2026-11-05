@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { codeOffset, errorLines, type ErrorRecord, parseStack } from "../bin/errors";
 import { growth } from "../bin/leaks";
-import { builtBytes, fixManifest, fixManifestDir, LANGUAGES, type Manifest, MAX_BYTES } from "../bin/manifest";
+import { builtBytes, fixLines, fixManifest, fixManifestDir, LANGUAGES, type Manifest, MAX_BYTES } from "../bin/manifest";
 import { diffTokens, tokens } from "../bin/module";
 import { perfLines } from "../bin/perf";
 import { MASKED } from "../src/values";
@@ -15,16 +15,15 @@ import { MASKED } from "../src/values";
 const scenario = (name: string, ...args: string[]) => JSON.parse(execFileSync("node", [join(import.meta.dir, "fixtures", "cli-extras-page.ts"), name, ...args], { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"] }));
 
 /** A plugin bundle as Evi's watch build makes it: CommonJS with an inline source map */
-async function watchBuild() {
+async function watchBuild(name = "plugin.ts", lines = [
+    "export function boom(): never {",
+    "    const reason: string = \"kaput\";",
+    "    throw new Error(reason);",
+    "}",
+]) {
     const dir = mkdtempSync(join(tmpdir(), "mist-errors-"));
-    writeFileSync(join(dir, "plugin.ts"), [
-        "export function boom(): never {",
-        "    const reason: string = \"kaput\";",
-        "    throw new Error(reason);",
-        "}",
-        "",
-    ].join("\n"));
-    const built = await Bun.build({ entrypoints: [join(dir, "plugin.ts")], outdir: join(dir, "out"), target: "browser", format: "cjs", sourcemap: "inline" });
+    writeFileSync(join(dir, name), [...lines, ""].join("\n"));
+    const built = await Bun.build({ entrypoints: [join(dir, name)], outdir: join(dir, "out"), target: "browser", format: "cjs", sourcemap: "inline" });
     expect(built.success).toBe(true);
     return built.outputs[0].path;
 }
@@ -40,14 +39,36 @@ test("mist errors reads the errors the page kept and new ones, masked, attribute
     expect(brief.slice(replayedAt)).toEqual([
         ["exception", ["patcher"], "patched module", "TypeError: x is undefined"],
         ["log", [], null, "network: Failed to load resource (https://example.com/a)"],
+        ["log", [], null, `network: POST https://discord.com/api/webhooks/123/${MASKED} 404 (https://discord.com/api/webhooks/123/${MASKED})`],
+        ["exception", [], null, "Error: at a signed URL"],
         ["console", ["alpha", "beta"], "logger", "[Webpack] Module 12 threw. It was patched by: alpha, beta Error: bad module"],
     ]);
-    expect(JSON.stringify(records)).not.toContain("secret-1");
+    for (const secret of ["secret-1", "hook-token-1", "wait=true", "sig-1", "frag"]) expect(JSON.stringify(records)).not.toContain(secret);
+    const signed = records.find(r => r.text.startsWith("Error: at a signed URL"))!;
+    expect([signed.text.split("\n")[1], signed.frames[0].url]).toEqual(["    at load (https://cdn.discordapp.com/assets/web.js:1:20)", "https://cdn.discordapp.com/assets/web.js"]);
     const mapped = records[2].frames[0];
     expect(mapped.url).toBe("evi://plugins/mapped-plugin.js");
     expect([mapped.original?.source.endsWith("plugin.ts"), mapped.original?.line]).toEqual([true, 3]);
     expect(errorLines(records[2], () => "t")[1]).toMatch(/^ {4}at Object\.boom \(.*plugin\.ts:3:11\)$/);
     expect(listening).toBe(0);
+}, 30_000);
+
+test("mist errors maps a frame through the build it ran in, and leaves a stack text's frame unmapped when its URL has several builds", async () => {
+    const old = await watchBuild("old.ts", ["export function complain(): void {", "    console.error(\"complaint\");", "}", "export function boom(): never {", "    throw new Error(\"old build\");", "}"]);
+    const newer = await watchBuild("new.ts", ["export const a = 1;", "export const b = 2;", "export function complain(): void {", "    console.error(\"complaint\");", "}", "export function boom(): never {", "    throw new Error(\"new build\");", "}"]);
+    const records = scenario("errorsAcrossBuilds", old, newer) as { text: string; plugins: string[]; original: { source: string; line: number; } | null; }[];
+    expect(records.map(r => [r.text, r.plugins])).toEqual([["complaint", ["twice-plugin"]], ["Error: old build", ["twice-plugin"]]]);
+    expect([records[0].original?.source.endsWith("old.ts"), records[0].original?.line]).toEqual([true, 2]);
+    expect(records[1].original).toBeNull();
+}, 30_000);
+
+test("mist errors and mist module never let Discord's page pause: pauses are skipped before the debugger is on, a pause that comes anyway is resumed, and a failed skip turns nothing on", () => {
+    const r = scenario("pauses");
+    for (const name of ["errors", "module"]) {
+        expect(r[name].skipped).toEqual({ paused: 0, resumed: false, enabled: true, error: null });
+        expect([r[name].ignored.paused, r[name].ignored.resumed]).toEqual([1, true]);
+        expect(r[name].fails).toEqual({ paused: 0, resumed: false, enabled: false, error: "mist didn't turn on Discord's debugger: it couldn't make it skip pauses first (not now), and a pause would freeze Discord" });
+    }
 }, 30_000);
 
 test("mist errors reads frames from a stack's text, with and without a function name", () => {
@@ -89,6 +110,8 @@ test("mist module reads the patched copy Evi compiled, diffs it, and says which 
     expect([r.id, r.loaded, r.patchedBy, r.patchedSame, r.byText]).toEqual(["77", true, ["alpha #0", "beta #3"], true, "77"]);
     // Changes this close together are one hunk, and it names both patches
     expect(r.hunks).toEqual([{ removed: "e.foo(1); return x + t.bar", added: `Evi.$("alpha").wrap(e.foo(1)); return x + t.baz`, plugins: ["alpha", "beta"], certain: true }]);
+    // Evi's `function` in place of `66` moves every position; the match is measured where the diff runs
+    expect(r.shorthand).toEqual([{ removed: "bar", added: "baz", plugins: ["delta"], certain: true }]);
     expect(r.unpatched).toBeNull();
     expect(r.many).toStartWith("2 modules contain function: 77, 88");
     expect(r.none).toBe("No webpack module has the id or the text no such text anywhere");
@@ -116,6 +139,15 @@ test("mist react lists the components above an element, masks their props, and m
     expect(none).toEqual({ matches: 0, components: [] });
 }, 30_000);
 
+test("mist react masks a password input's value and default, and the value of an input autocompleted as a password or one-time code", () => {
+    const { password } = scenario("react");
+    expect(password.components.map((c: { props: unknown; }) => c.props)).toEqual([
+        { type: "password", value: MASKED, defaultValue: MASKED, name: "pw" },
+        { autoComplete: "one-time-code", value: MASKED, label: "Code" },
+        { value: "shown" },
+    ]);
+}, 30_000);
+
 test("mist leaks finds what grows with every cycle, leaves the plugin on, and refuses anything but a running dev build before switching it", () => {
     const r = scenario("leaks");
     expect(r.leaky).toEqual({ styles: 1, subscribers: 1 });
@@ -123,7 +155,15 @@ test("mist leaks finds what grows with every cycle, leaves the plugin on, and re
     expect([r.clean, r.cleanRunning]).toEqual([{}, true]);
     expect(r.installed).toBe("mist leaks turns plugins off and on, so it runs only on dev builds, and installed is a store install");
     expect(r.off).toBe("off isn't running: turn it on first, so mist leaks can leave it as it was");
+    expect(r.native).toBe("native has a native side, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself");
+    expect(r.chromiumSwitches).toBe("switches has Chromium switches, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself");
     expect(r.refusedSwitches).toBe(0);
+}, 30_000);
+
+test("mist leaks turns the plugin on again when turning it off fails, and when it is stopped between steps", () => {
+    const r = scenario("leaks");
+    expect([r.failsOff, r.failsOffRunning]).toEqual([expect.stringContaining("stop threw"), true]);
+    expect([r.stopped, r.stoppedRunning]).toEqual(["mist leaks stopped at Ctrl+C. stoppable is on.", true]);
 }, 30_000);
 
 test("mist leaks doesn't call one cycle's rise a leak", () => {
@@ -181,4 +221,41 @@ test("mist manifest fix says how far over a manifest stays when its current note
     expect(fix.trimmed).toEqual([]);
     expect(fix.over).toBe(fix.bytes.after - MAX_BYTES);
     expect(fix.over).toBeGreaterThan(0);
+});
+
+test("mist manifest fix asks for every language's notes when this version's entry has none, as Evi's check does", () => {
+    const locales = Object.fromEntries(LANGUAGES.map(lang => [lang, { name: "Demo", description: "D", changelog: { "1.2.0": [] } }]));
+    const fix = fixManifest(manifest({ changelog: [{ version: "1.2.0", notes: [] }], locales }), "demo", false);
+    expect(fix.missing).toEqual(LANGUAGES.map(lang => `${lang} 1.2.0 notes`));
+});
+
+test("mist manifest fix drops a prerelease's notes before its release's", () => {
+    const notes = (lang: string, v: string) => Array.from({ length: 3 }, () => `${lang} ${v} ${"x".repeat(250)}`);
+    const locales = Object.fromEntries(LANGUAGES.map(lang => [lang, {
+        name: "Demo", description: "D", changelog: Object.fromEntries(["1.1.0-beta.10", "1.1.0", "1.1.0-beta.2", "1.2.0"].map(v => [v, notes(lang, v)])),
+    }]));
+    const fix = fixManifest(manifest({ locales }), "demo", false);
+    expect(fix.over).toBe(0);
+    expect(fix.trimmed).toEqual(["1.1.0-beta.2", "1.1.0-beta.10"]);
+    expect(Object.keys(fix.manifest.locales!.de.changelog!)).toContain("1.1.0");
+});
+
+test("mist manifest fix drops and writes nothing when even dropping every old translated note wouldn't fit, and says how far over it is", () => {
+    const locales = Object.fromEntries(LANGUAGES.map(lang => [lang, {
+        name: "Demo", changelog: { "1.2.0": Array.from({ length: 6 }, () => "y".repeat(400)), "1.1.0": ["z".repeat(400)] },
+    }]));
+    const dir = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    const path = join(dir, "manifest.json");
+    const original = JSON.stringify(manifest({ locales }), null, 4);
+    writeFileSync(path, original);
+
+    const r = fixManifestDir(dir, true);
+    expect(r.trimmed).toEqual([]);
+    expect(Object.keys(r.manifest.locales!.fr.changelog!)).toEqual(["1.2.0", "1.1.0"]);
+    expect(r.over).toBeGreaterThan(0);
+    const allOldDropped = structuredClone(r.manifest);
+    for (const locale of Object.values(allOldDropped.locales!)) delete locale.changelog!["1.1.0"];
+    expect(r.over).toBe(builtBytes(allOldDropped, basename(dir), false) - MAX_BYTES);
+    expect([r.written, readFileSync(path, "utf8")]).toEqual([false, original]);
+    expect(fixLines(r)).toContain(`${r.over} bytes over even with every old translated note gone, so nothing is dropped and nothing written: shorten the English changelog or this version's translations.`);
 });

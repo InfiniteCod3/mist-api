@@ -201,16 +201,20 @@ function storeLines({ store, methods, stateKeys }: StoreMethods): string[] {
     ];
 }
 
-/** Runs a watch until Ctrl+C; a second Ctrl+C exits at once */
-async function untilInterrupted(run: (stopped: () => boolean) => Promise<void>) {
+/**
+ * Runs a watch until Ctrl+C; a second Ctrl+C exits at once, unless `holdExit` says why the run
+ * has to end by itself, which then prints instead
+ */
+async function untilInterrupted<T>(run: (stopped: () => boolean) => Promise<T>, holdExit?: string): Promise<T> {
     let interrupted = false;
     const interrupt = () => {
-        if (interrupted) process.exit(130);
+        if (interrupted && holdExit) console.error(holdExit);
+        else if (interrupted) process.exit(130);
         interrupted = true;
     };
     process.on("SIGINT", interrupt);
     try {
-        await run(() => interrupted);
+        return await run(() => interrupted);
     } finally {
         process.off("SIGINT", interrupt);
     }
@@ -379,8 +383,9 @@ async function main() {
                     await checkLeakTarget(c.send, id);
                     throw new CdpError(`mist leaks turns ${id} off and on ${options.cycles} times, which changes its switch in Evi's settings and runs its stop and start. It leaves it on. Add --yes to run it.`);
                 }
-                console.error(`Turning ${id} off and on ${options.cycles} times`);
-                return print(await findLeaks(c.send, id, { cycles: options.cycles }), options.json, leakLines);
+                console.error(`Turning ${id} off and on ${options.cycles} times. Ctrl+C stops after turning it on again.`);
+                const report = await untilInterrupted(stopped => findLeaks(c.send, id, { cycles: options.cycles, stopped }), `Turning ${id} on again before mist leaks exits`);
+                return print(report, options.json, leakLines);
             }
             case "perf":
                 return print(await readPerf(c.send), options.json, r => perfLines(r, options.all ? Infinity : 5));

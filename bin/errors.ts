@@ -3,16 +3,18 @@
  * CDP, attributed to a plugin where the message or the stack says which, with plugin frames mapped
  * through the inline source map of a watch build.
  */
-import { callOn, evaluate, type Listen, type Send } from "./cdp.ts";
+import { callOn, CdpError, evaluate, type Listen, type Send } from "./cdp.ts";
 import { type Limits, pageSnapshot } from "./page.ts";
 import { type Mapper, mapper, parseDataUrl, type Position } from "./sourcemap.ts";
 
 interface RemoteObject { type: string; subtype?: string; value?: unknown; unserializableValue?: string; objectId?: string; description?: string; }
-interface CallFrame { functionName: string; url: string; lineNumber: number; columnNumber: number; }
+interface CallFrame { functionName: string; scriptId?: string; url: string; lineNumber: number; columnNumber: number; }
 interface StackTrace { callFrames: CallFrame[]; }
 
 /** A stack frame, 1-based as a stack prints it, with where it came from in the plugin's source when its map says */
 export interface Frame { fn: string; url: string; line: number; column: number; original: Position | null; }
+/** A frame before mapping; CDP's frames name the script they ran in, frames read from a stack's text don't */
+type RawFrame = Omit<Frame, "original"> & { scriptId?: string; };
 export type ErrorSource = "console" | "exception" | "log";
 export type Attribution = "logger" | "stack" | "patched module";
 export interface ErrorRecord {
@@ -41,11 +43,20 @@ export function rawEvent(method: string, params: any): Raw | null {
         }
         case "Log.entryAdded": {
             const e = params.entry ?? {};
-            return e.level === "error" ? { at: e.timestamp, source: "log", args: [], text: `${e.source}: ${e.text}${e.url ? ` (${e.url})` : ""}`, stack: e.stackTrace } : null;
+            return e.level === "error" ? { at: e.timestamp, source: "log", args: [], text: scrubUrls(`${e.source}: ${e.text}${e.url ? ` (${e.url})` : ""}`), stack: e.stackTrace } : null;
         }
     }
     return null;
 }
+
+/** A query string or fragment can carry a token, and a webhook URL's segment after its id is one */
+function scrubUrl(url: string): string {
+    const [, base, position = ""] = /^(.*?)((?::\d+){1,2})?$/.exec(url)!;
+    return base.replace(/(\/webhooks\/\d+\/)[^/?#]+/, "$1[secret]").replace(/[?#].*/, "") + position;
+}
+
+/** Every URL in the text, scrubbed */
+export const scrubUrls = (text: string) => text.replace(/\b[a-z][\w+.-]*:\/\/[^\s"'<>()]+/gi, scrubUrl);
 
 /** `    at fn (url:line:col)` and `    at url:line:col` lines of a V8 stack */
 export function parseStack(text: string): Omit<Frame, "original">[] {
@@ -97,7 +108,26 @@ export function inlineMapUrl(source: string): string | null {
     return all.length ? all[all.length - 1][1] : null;
 }
 
-interface Script { id: string; mapUrl: string; }
+/**
+ * Turns on CDP's debugger, to read scripts, without ever pausing Discord's page. Skipping pauses
+ * before Debugger.enable leaves no moment when a breakpoint or `debugger;` stops the page, and a pause
+ * that comes anyway, as when another client turns skipping off, is resumed. Returns the unsubscribe.
+ */
+export async function enableDebugger(send: Send, listen: Listen): Promise<() => void> {
+    try {
+        await send("Debugger.setSkipAllPauses", { skip: true });
+    } catch (err) {
+        throw new CdpError(`mist didn't turn on Discord's debugger: it couldn't make it skip pauses first (${(err as Error).message}), and a pause would freeze Discord`);
+    }
+    const off = listen("Debugger.paused", () => void send("Debugger.resume").catch(() => { }));
+    try {
+        await send("Debugger.enable");
+    } catch (err) {
+        off();
+        throw err;
+    }
+    return off;
+}
 
 export interface ErrorOptions {
     /** Keep listening until `stopped` */
@@ -118,10 +148,16 @@ export interface ErrorOptions {
  */
 export async function watchErrors(send: Send, listen: Listen, options: ErrorOptions, onRecord: (record: ErrorRecord) => void): Promise<void> {
     const { follow, stopped = () => false, limits, settleMs = 300, pollMs = 250, onReplayed = () => { } } = options;
-    const scripts = new Map<string, Script>();
+    /** A hot reload compiles a new script at the same URL, so scripts are kept by id */
+    const mapUrls = new Map<string, string>();
+    const idsByUrl = new Map<string, string[]>();
     const queue: Raw[] = [];
     const off = [
-        listen("Debugger.scriptParsed", p => { if (p.url) scripts.set(p.url, { id: p.scriptId, mapUrl: p.sourceMapURL ?? "" }); }),
+        listen("Debugger.scriptParsed", p => {
+            if (!p.url) return;
+            mapUrls.set(p.scriptId, p.sourceMapURL ?? "");
+            (idsByUrl.get(p.url) ?? idsByUrl.set(p.url, []).get(p.url)!).push(p.scriptId);
+        }),
         ...["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"].map(method => listen(method, params => {
             const raw = rawEvent(method, params);
             if (raw) queue.push(raw);
@@ -149,25 +185,29 @@ export async function watchErrors(send: Send, listen: Listen, options: ErrorOpti
     };
 
     const mappers = new Map<string, Promise<{ map: Mapper; offset: { line: number; column: number; }; } | null>>();
-    const mapperOf = (url: string) => {
-        const script = scripts.get(url);
-        if (!script) return Promise.resolve(null);
-        let found = mappers.get(script.id);
-        if (!found) mappers.set(script.id, found = (async () => {
-            const { scriptSource } = await send("Debugger.getScriptSource", { scriptId: script.id }).catch(() => ({ scriptSource: "" }));
-            const map = parseDataUrl(script.mapUrl) ?? parseDataUrl(inlineMapUrl(scriptSource) ?? "");
+    const mapperOf = (scriptId: string) => {
+        const mapUrl = mapUrls.get(scriptId);
+        if (mapUrl === undefined) return Promise.resolve(null);
+        let found = mappers.get(scriptId);
+        if (!found) mappers.set(scriptId, found = (async () => {
+            const { scriptSource } = await send("Debugger.getScriptSource", { scriptId }).catch(() => ({ scriptSource: "" }));
+            const map = parseDataUrl(mapUrl) ?? parseDataUrl(inlineMapUrl(scriptSource) ?? "");
             return map ? { map: mapper(map), offset: codeOffset(scriptSource) } : null;
         })());
         return found;
     };
-    const mapFrame = async (frame: Omit<Frame, "original">): Promise<Frame> => {
-        if (!pluginOfUrl(frame.url)) return { ...frame, original: null };
-        const found = await mapperOf(frame.url);
-        if (!found) return { ...frame, original: null };
+    const mapFrame = async ({ scriptId, ...frame }: RawFrame): Promise<Frame> => {
+        const shown = { ...frame, url: scrubUrl(frame.url) };
+        const ids = idsByUrl.get(frame.url);
+        // A frame read from a stack's text can't say which of several builds at its URL it ran in
+        const id = scriptId ?? (ids?.length === 1 ? ids[0] : undefined);
+        if (!pluginOfUrl(frame.url) || id === undefined) return { ...shown, original: null };
+        const found = await mapperOf(id);
+        if (!found) return { ...shown, original: null };
         const line = frame.line - 1 - found.offset.line;
         const column = frame.column - 1 - (line === 0 ? found.offset.column : 0);
         const at = line >= 0 && column >= 0 ? found.map(line, column) : null;
-        return { ...frame, original: at && { ...at, line: at.line + 1, column: at.column + 1 } };
+        return { ...shown, original: at && { ...at, line: at.line + 1, column: at.column + 1 } };
     };
 
     const show = async (arg: RemoteObject): Promise<string> => {
@@ -196,8 +236,8 @@ export async function watchErrors(send: Send, listen: Listen, options: ErrorOpti
         const text = [raw.text, ...parts].filter(Boolean).join(" ");
 
         const stackText = args.filter(a => a.subtype === "error").map(a => a.description ?? "").join("\n");
-        const frames = parseStack(stackText);
-        if (!frames.length) for (const f of raw.stack?.callFrames ?? []) frames.push({ fn: f.functionName, url: f.url, line: f.lineNumber + 1, column: f.columnNumber + 1 });
+        const frames: RawFrame[] = parseStack(stackText);
+        if (!frames.length) for (const f of raw.stack?.callFrames ?? []) frames.push({ fn: f.functionName, scriptId: f.scriptId, url: f.url, line: f.lineNumber + 1, column: f.columnNumber + 1 });
 
         let plugins: string[] = [];
         let via: Attribution | null = null;
@@ -221,17 +261,17 @@ export async function watchErrors(send: Send, listen: Listen, options: ErrorOpti
             }
         }
         const prefixText = logger !== null && !byName.has(logger) ? `[${logger}] ` : "";
-        return { at: Math.floor(raw.at), source: raw.source, text: prefixText + text, plugins, via, frames: await Promise.all(frames.slice(0, 8).map(mapFrame)) };
+        return { at: Math.floor(raw.at), source: raw.source, text: scrubUrls(prefixText + text), plugins, via, frames: await Promise.all(frames.slice(0, 8).map(mapFrame)) };
     };
 
     const drain = async () => {
         while (queue.length) onRecord(await record(queue.shift()!));
     };
 
+    let stopDebugger = () => { };
     try {
         await refreshNames();
-        await send("Debugger.enable").catch(() => { });
-        await send("Debugger.setSkipAllPauses", { skip: true }).catch(() => { });
+        stopDebugger = await enableDebugger(send, listen);
         await send("Runtime.enable");
         await send("Log.enable").catch(() => { });
         await new Promise(resolve => setTimeout(resolve, settleMs));
@@ -243,6 +283,7 @@ export async function watchErrors(send: Send, listen: Listen, options: ErrorOpti
         }
     } finally {
         for (const stop of off) stop();
+        stopDebugger();
         for (const method of ["Log.disable", "Runtime.disable", "Debugger.disable"]) await send(method).catch(() => { });
     }
 }

@@ -38,19 +38,19 @@ const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navig
 const { isDiscordClient } = await import("../src/discord/rest");
 const { createMist } = await import("../src/index");
 
-/** Evi's plugins, by id: each one's manifest permissions. Absent from Evi.plugins when undefined. */
-let declarations: Record<string, unknown> | undefined;
+/** Evi's plugins, by id: each one's manifest permissions, undefined for one that declares none. An id not listed isn't loaded. */
+let declarations: Record<string, unknown>;
 const pageGlobals = globalThis as { Evi?: unknown; };
 const eviBefore = pageGlobals.Evi;
 beforeEach(() => {
-    declarations = undefined;
-    pageGlobals.Evi = { plugins: { get: (id: string) => declarations && id in declarations ? { manifest: { id, permissions: declarations[id] } } : undefined } };
+    declarations = { "t-discord": undefined };
+    pageGlobals.Evi = { plugins: { get: (id: string) => id in declarations ? { manifest: { id, permissions: declarations[id] } } : undefined } };
 });
 afterAll(() => {
     pageGlobals.Evi = eviBefore;
 });
 
-/** Not declared in Evi: held to nothing */
+/** Loaded, declaring nothing: held to nothing */
 const api = discord("t-discord");
 
 const ME = "100000000000000001", ALT = "100000000000000002";
@@ -353,6 +353,14 @@ test("a plugin that declares nothing is allowed everything, as Evi allows it", a
     await plugin.rest.patch("/users/@me/settings-proto/1");
     await collect(plugin.messages("9"));
     expect(requests).toHaveLength(3);
+});
+
+test("an id Evi has no plugin by is refused, so a made-up id isn't a plugin that declares nothing", async () => {
+    serve(ok);
+    const err = await refusal(discord("t-made-up").rest.get("/users/@me"));
+    expect(err).toMatchObject({ name: "UnknownPluginError", plugin: "t-made-up" });
+    expect(await refusal(collect(discord("t-made-up").messages("9")))).toMatchObject({ name: "UnknownPluginError" });
+    expect(requests).toHaveLength(0);
 });
 
 test("discord takes the plugin's mist object, and refuses what has no id", async () => {

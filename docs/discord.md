@@ -3,7 +3,7 @@
 `@aurologic/mist-api/discord` reaches the parts of Discord's app that many plugins rebuild for themselves. It covers the saved accounts and account switches, Discord's own API client, Discord's router, avatars, the clipboard, dates and durations in Discord's language, and the message box. It runs on the page side only, because it imports from `@evi/api`.
 
 ```ts
-import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, whenConnected } from "@aurologic/mist-api/discord";
+import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, UnknownPluginError, whenConnected } from "@aurologic/mist-api/discord";
 
 const api = discord(mist);
 ```
@@ -35,7 +35,7 @@ Evi holds a plugin to the `permissions` in its `manifest.json`. Evi's [plugin gu
 
 mist reads the path as Discord's API does. It decodes `%`-escapes, so `/users/%40me` is `/users/@me`, and it drops repeated and trailing slashes, the query, and the fragment. A path it can't decode needs every flag. mist reads the declaration from `Evi.plugins` at each request, so it follows an update.
 
-A refused request throws a `PluginPermissionError` before anything is sent. Its `permission` names what to declare, and its `message` matches Evi's, as in `example can't send messages (discord.com): its manifest doesn't declare permissions.sendMessages`.
+An id Evi has no loaded plugin by throws an `UnknownPluginError` at each request, before anything is sent, so a made-up id doesn't count as a plugin that declares nothing. A refused request throws a `PluginPermissionError` before anything is sent. Its `permission` names what to declare, and its `message` matches Evi's, as in `example can't send messages (discord.com): its manifest doesn't declare permissions.sendMessages`.
 
 These checks mirror Evi's guard. They catch what an honest plugin forgot to declare. They don't make the declaration a sandbox, because plugin code can reach Discord's client in other ways. Store reviewers still read the code and compare the declaration with what it does, and the store shows the declaration to users.
 

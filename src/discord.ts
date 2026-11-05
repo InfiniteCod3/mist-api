@@ -5,7 +5,7 @@ export { accounts, type AccountEvent, type AccountEvents, type SavedAccount, typ
 export { chat } from "./discord/chat.ts";
 export { type DurationOptions, type DurationStyle, format } from "./discord/format.ts";
 export { avatarUrl, type AvatarOwner, copy, navigate } from "./discord/page.ts";
-export { type PermissionFlag, type PermissionKey, PluginPermissionError } from "./discord/permissions.ts";
+export { type PermissionFlag, type PermissionKey, PluginPermissionError, UnknownPluginError } from "./discord/permissions.ts";
 export { type ApiMessage, DiscordApiError, type MessagesOptions, type Rest, type RestOptions } from "./discord/rest.ts";
 
 export interface DiscordApi {

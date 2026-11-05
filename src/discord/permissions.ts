@@ -78,8 +78,21 @@ interface EviPlugins {
     plugins?: { get(id: string): { manifest?: { permissions?: unknown; }; } | undefined; };
 }
 
+/** Thrown for an id Evi has no plugin by: without this, any made-up id would count as a plugin that declares nothing */
+export class UnknownPluginError extends Error {
+    override name = "UnknownPluginError";
+
+    constructor(readonly plugin: string) {
+        super(`${plugin} isn't a plugin Evi has loaded: pass discord() the plugin's own mist object or id`);
+    }
+}
+
 // Read at each request, not kept: an update can change the declaration while the page stays open
-const declaredBy = (plugin: string) => readPermissions((globalThis as { Evi?: EviPlugins; }).Evi?.plugins?.get(plugin)?.manifest?.permissions);
+function declaredBy(plugin: string) {
+    const installed = (globalThis as { Evi?: EviPlugins; }).Evi?.plugins?.get(plugin);
+    if (!installed) throw new UnknownPluginError(plugin);
+    return readPermissions(installed.manifest?.permissions);
+}
 
 /** Throws unless the plugin's manifest covers `method` on `path` (a path on Discord's API) */
 export function checkApiRequest(plugin: string, method: string, path: string) {

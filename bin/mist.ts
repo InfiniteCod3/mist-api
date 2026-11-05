@@ -114,6 +114,7 @@ function statusLines(all: any[]): string[] {
         const r = p.registry;
         if (r && r.registered > 1) out.push(`  registry: registered ${r.registered} times, ${r.replaced} replacing another handle (a hot reload replaces one)`);
         for (const concern of p.concerns ?? []) out.push(`  WARNING: ${concern}`);
+        for (const warning of s.warnings ?? []) out.push(`  warning: ${warning}`);
         const health = (h: Record<string, number>) => Object.entries(h).map(([k, v]) => `${v} ${k}`).join(", ") || "none";
         if (p.patches?.error) out.push(`  patches: ${p.patches.error}`);
         else if (p.patches) out.push(`  patches: ${health(p.patches.health)}`, ...p.patches.problems.map((x: any) => `    #${x.index} ${x.health} find ${x.find}${x.errors.length ? `: ${x.errors.join("; ")}` : ""}`));

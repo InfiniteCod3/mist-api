@@ -46,6 +46,12 @@ function quietly<T>(fn: () => T): T {
     }
 }
 
+/** The rendered text, as plain data: a failed match on a test instance would print its whole tree */
+function text(root: ReactTestRenderer): string {
+    const walk = (node: unknown): string => typeof node === "string" ? node : Array.isArray(node) ? node.map(walk).join("") : (node as { children?: unknown[]; } | null)?.children?.map(walk).join("") ?? "";
+    return walk(root.toJSON());
+}
+
 const errors = (run: ReturnType<typeof fakeContext>) => run.logs.filter(l => l.level === "error");
 
 test("Boundary shows a notice with Retry instead of a child that throws, logs once, and renders the child again on retry", () => {
@@ -56,9 +62,7 @@ test("Boundary shows a notice with Retry instead of a child that throws, logs on
         return h("span", null, "12:00");
     }
     const root = quietly(() => render(h("div", null, h(ui.Boundary, { name: "Clock", mist: { log: run.ctx.logger } }, h(Clock)), h("b", null, "Discord"))));
-    const notice = root.root.findByProps({ role: "alert" });
-    expect(notice.children[0]).toBe("Clock couldn't be shown.");
-    expect(root.root.findByType("b").children).toEqual(["Discord"]);
+    expect(text(root)).toBe("Clock couldn't be shown.RetryDiscord");
     expect(errors(run)).toHaveLength(1);
     expect(errors(run)[0].args).toEqual(["Clock threw while rendering; showing its fallback", new Error("no time")]);
 
@@ -68,7 +72,7 @@ test("Boundary shows a notice with Retry instead of a child that throws, logs on
 
     broken = false;
     act(() => root.root.findByType("button").props.onClick());
-    expect(root.root.findByType("span").children).toEqual(["12:00"]);
+    expect(text(root)).toBe("12:00Discord");
 });
 
 test("boundary() names the wrapped component and passes its fallback function the error and a retry", () => {
@@ -80,7 +84,7 @@ test("boundary() names the wrapped component and passes its fallback function th
     const Wrapped = ui.boundary(Weather, { fallback: (error, retry) => h("i", { onClick: retry }, String((error as Error).message)), mist: { log: { error() { } } } });
     expect(Wrapped.displayName).toBe("boundary(Weather)");
     const root = quietly(() => render(h(Wrapped, { city: "Oslo" })));
-    expect(root.root.findByType("i").children).toEqual(["no weather for Oslo"]);
+    expect(text(root)).toBe("no weather for Oslo");
     const before = thrown;
     quietly(() => act(() => root.root.findByType("i").props.onClick()));
     expect(thrown).toBeGreaterThan(before);
@@ -226,11 +230,9 @@ test("accessories render under the message with its props, and one that throws s
     ui.accessories.add(run.ctx, "a-summary", ({ message, channel }) => h("p", null, `${channel.id}: ${message.content}`));
     ui.accessories.add(run.ctx, "b-broken", () => { throw new Error("broken accessory"); });
     const root = quietly(() => render(h(Accessories, { message: { id: "m", content: "hi" }, channel: { id: "c" } })));
-    expect(root.root.findByType("p").children).toEqual(["c: hi"]);
-    expect(root.root.findByProps({ role: "alert" }).children[0]).toBe("t-accessories/b-broken couldn't be shown.");
+    expect(text(root)).toBe("(edited)c: hit-accessories/b-broken couldn't be shown.Retry");
     act(() => run.dispose());
-    expect(root.root.findAllByType("p")).toHaveLength(0);
-    expect(root.root.findByType("span").children).toEqual(["(edited)"]);
+    expect(text(root)).toBe("(edited)");
 });
 
 function sendFixture(failureReason?: string) {

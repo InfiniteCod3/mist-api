@@ -1,5 +1,8 @@
 /** Finding Discord's main window from native code. */
-import { BrowserWindow } from "electron";
+// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
+// import of a part the mock lacks would fail to link before any of mist runs
+import * as electron from "electron";
+import type { BrowserWindow } from "electron";
 
 const APP_HOSTS = ["discord.com", "ptb.discord.com", "canary.discord.com"];
 
@@ -21,7 +24,7 @@ function isAppWindow(win: BrowserWindow) {
  */
 export function discordWindow(): BrowserWindow | undefined {
     const id = (globalThis as { mainWindowId?: unknown; }).mainWindowId;
-    const main = typeof id === "number" ? BrowserWindow.fromId(id) : null;
+    const main = typeof id === "number" ? electron.BrowserWindow.fromId(id) : null;
     if (main && isAppWindow(main)) return main;
-    return BrowserWindow.getAllWindows().find(isAppWindow);
+    return electron.BrowserWindow.getAllWindows().find(isAppWindow);
 }

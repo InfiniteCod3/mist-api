@@ -110,6 +110,21 @@ console.log(JSON.stringify([run.ctx.settings.get("volume"), run.logs[0].args]));
     }
     if (tested !== '[3,["found",1]]') problems.push(`the testing subpath under Node printed ${tested}`);
 
+    // A plugin's native tests often mock electron with only what they use, as here with only net
+    mkdirSync(join(app, "node_modules", "electron"), { recursive: true });
+    writeFileSync(join(app, "node_modules", "electron", "package.json"), JSON.stringify({ name: "electron", type: "module", main: "index.js" }));
+    writeFileSync(join(app, "node_modules", "electron", "index.js"), "export const net = {};");
+    let partial: string;
+    try {
+        partial = execFileSync("node", ["--input-type=module", "-e", `
+import { defineNative, jsonFile, discordWindow } from "${name}/native";
+console.log([typeof defineNative, typeof jsonFile, typeof discordWindow].join(","));
+`], { cwd: app, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    } catch (err) {
+        partial = String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => /Error/.test(line)) ?? String(err);
+    }
+    if (partial !== "function,function,function") problems.push(`the native subpath doesn't load next to an electron mock with only net: ${partial}`);
+
     writeFileSync(join(app, "plugin", "index.ts"), `
 import { createMist } from "${name}";
 import { sleep } from "${name}/util";

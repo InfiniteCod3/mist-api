@@ -4,7 +4,10 @@
  * native code read or write a path nobody picked.
  */
 import type { NativeContext } from "@evi/api/native";
-import { dialog, type OpenDialogOptions } from "electron";
+// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
+// import of a part the mock lacks would fail to link before any of mist runs
+import * as electron from "electron";
+import type { OpenDialogOptions } from "electron";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { NativeError } from "./errors.ts";
@@ -58,7 +61,7 @@ export function pathGrants(ctx: NativeContext): PathGrants {
     async function pick(kind: Grant["kind"], { title, buttonLabel, defaultPath, filters }: PickOptions = {}): Promise<GrantHandle | null> {
         const options: OpenDialogOptions = { title, buttonLabel, defaultPath, filters, properties: [kind === "file" ? "openFile" : "openDirectory"] };
         const parent = discordWindow();
-        const { canceled, filePaths } = await (parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options));
+        const { canceled, filePaths } = await (parent ? electron.dialog.showOpenDialog(parent, options) : electron.dialog.showOpenDialog(options));
         if (canceled || !filePaths[0]) return null;
         const handle = `grant:${crypto.randomUUID()}` as GrantHandle;
         const grant: Grant = { kind, path: resolve(filePaths[0]) };

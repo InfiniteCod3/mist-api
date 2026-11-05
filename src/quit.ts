@@ -3,7 +3,9 @@
  * whatever must not be lost or left running registers here too.
  */
 import type { NativeContext } from "@evi/api/native";
-import { app } from "electron";
+// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
+// import of a part the mock lacks would fail to link before any of mist runs
+import * as electron from "electron";
 
 const runs = new WeakMap<NativeContext, Set<() => void>>();
 
@@ -23,10 +25,10 @@ export function atQuit(ctx: NativeContext, fn: () => void): () => void {
                 try { each(); } catch (err) { console.error(`[${ctx.pluginId}] Quitting:`, err); }
             }
         };
-        app.on("will-quit", quit);
+        electron.app?.on("will-quit", quit);
         process.on("exit", quit);
         ctx.onDispose(() => {
-            app.removeListener("will-quit", quit);
+            electron.app?.removeListener("will-quit", quit);
             process.removeListener("exit", quit);
             runs.delete(ctx);
         });

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- `@aurologic/mist-api/native` loads next to a test's mock of `electron` that has only some of Electron's exports. 0.3.0 imported `app`, `BrowserWindow`, `dialog` and `safeStorage` by name, so a plugin whose native tests mocked `electron` with only `net`, say, failed to load mist at all. mist now reads them from Electron when a toolkit function runs, and the quit hook does nothing where there is no `app`.
+
 ## 0.3.0
 
 - Debug reports for users who can't run the CLI: `mist.report()` returns a report with the plugin, mist-api, Evi and Discord versions, the plugin's status, and its recent page and native logs and calls. Every recorded value shows as its type and size only. `mist.copyReport()` copies it and toasts the result, for a button in `settingsPanel`, and `mist.reportCommand()` is a slash command for `ctx.command` that copies it, or shows it when copying fails.

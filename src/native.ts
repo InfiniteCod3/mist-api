@@ -134,7 +134,8 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
             abortable.set(mark.id, controller);
             signal = AbortSignal.any([run.signal, controller.signal]);
         }
-        const receiver: object = inherited ? outer : Object.create(module, { signal: { value: signal } });
+        // A proxy, not Object.create(module): a method that keeps state on `this` must still write to the module
+        const receiver: object = inherited ? outer : new Proxy(module, { get: (target, key) => key === "signal" ? signal : Reflect.get(target, key) });
         callThis.add(receiver);
         const forget = () => { if (controller) abortable.delete(mark!.id!); };
 
@@ -178,7 +179,7 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
         try {
             return lifecycle.stop?.call(this);
         } finally {
-            
+            run.abort(new DOMException(`${self.prefix.slice(1, -1)}'s native side stopped`, "AbortError"));
             abortable.clear();
             channel?.stop();
             asks?.stop();

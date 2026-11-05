@@ -196,3 +196,15 @@ test("a call mark is stripped before the method and its record see the arguments
         process.argv = argv;
     }
 });
+
+test("state a method keeps on this lands on the module, as before calls had their own signal", async () => {
+    const { native } = await freshNative();
+    const module = native.defineNative({
+        bump(this: { count?: number; }): number { return this.count = (this.count ?? 0) + 1; },
+    } as { bump(): number; });
+    module.start({ pluginId: "t-state" } as NativeContext);
+    const { mist } = page<typeof module>("t-state", module);
+    expect(await mist.native.bump()).toBe(1);
+    expect(await mist.native.bump.with({ signal: new AbortController().signal })()).toBe(2);
+    expect((module as { count?: number; }).count).toBe(2);
+});

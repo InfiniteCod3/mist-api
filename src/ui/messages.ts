@@ -87,7 +87,7 @@ export const messages = {
     /** Put these in the plugin's `patches` */
     patches: [
         onDemand({
-            // The chat box's handleSendMessage checks the message, then reads its content (checked 2026-11-04):
+            // The chat box's handleSendMessage checks the message, then reads its content (checked 2026-11-05):
             //   return(0,nA.i)({…,channel:h}).then(e=>{let{valid:s,failureReason:A}=e;if(!s)if(…)…;else return{shouldClear:!1,shouldRefocus:!1};let f=(0,tD.S)(t,{channel:h,isEdit:!1});
             // The listeners run between the two, so a changed content goes through Discord's own handling.
             // Cancelling answers what an invalid message does: the text stays in the box.
@@ -100,7 +100,7 @@ export const messages = {
             },
         }),
         onDemand({
-            // The message editor's onSubmit checks the edit, then reads its content (checked 2026-11-04):
+            // The message editor's onSubmit checks the edit, then reads its content (checked 2026-11-05):
             //   u({value:e,channel:n,message:t}).then(s=>{let{valid:u}=s;if(!u)return Promise.resolve({shouldClear:!1,shouldRefocus:!1});let d=(0,l.S)(e,{channel:n,isEdit:!0});
             find: "isEdit:!0",
             replace: {

@@ -35,7 +35,7 @@ export interface EntryOptions {
     fallback?: Fallback;
 }
 
-function listState<P extends object, F extends object>(name: string, calls: (state: ListState<P>, render: (props: P) => ReactElement) => F) {
+function listState<P extends object, F extends object>(name: string, calls: (render: (props: P) => ReactElement) => F) {
     return shared<ListState<P> & F>(name, () => {
         const state: ListState<P> = { protocol: 1, entries: new Map(), listeners: new Set(), list: [] };
         const listen = (listener: () => void) => {
@@ -51,7 +51,7 @@ function listState<P extends object, F extends object>(name: string, calls: (sta
         }
         MistEntries.displayName = `MistEntries(${name})`;
         const render = (props: P) => React.createElement(MistEntries, { key: `mist-api.ui/${name}`, props });
-        return Object.assign(state, calls(state, render));
+        return Object.assign(state, calls(render));
     }, s => s.entries instanceof Map && s.listeners instanceof Set && Array.isArray(s.list));
 }
 
@@ -102,7 +102,7 @@ export interface ChatBarProps {
 
 const CHAT_BAR = "chat-bar";
 
-const chatBarState = () => listState<ChatBarProps, { inject(buttons: unknown, props: ChatBarProps): void; }>(CHAT_BAR, (_, render) => ({
+const chatBarState = () => listState<ChatBarProps, { inject(buttons: unknown, props: ChatBarProps): void; }>(CHAT_BAR, render => ({
     inject(buttons, props) {
         // An input without buttons of its own (some special text boxes) stays without
         if (!Array.isArray(buttons) || !buttons.length || props?.channel == null) return;
@@ -148,8 +148,8 @@ export const chatBar = {
      * buttons show once, from whichever plugins are on.
      */
     patches: [onDemand({
-        // ChannelTextAreaButtons builds its buttons into an array, the send button last (checked 2026-11-04):
-        //   Z&&V&&q.push((0,l.jsx)(_,{channelId:A.id,type:S},"appLauncher")),ee&&q.push((0,l.jsx)(eu,{onClick:b,disabled:C||G},"submit")),0===q.length)?null:...
+        // ChannelTextAreaButtons builds its buttons into an array, the send button last (checked 2026-11-05):
+        //   q&&F&&$.push((0,i.jsx)(b,{channelId:S.id,type:T},"appLauncher")),ee&&$.push((0,i.jsx)(ed,{onClick:N,disabled:g||j},"submit")),0===$.length)?null:…
         // The call goes after that push and leaves both pushes and the length check alone for other patches.
         find: "\"ChannelTextAreaButtons\"",
         replace: {
@@ -187,14 +187,14 @@ export interface PopoverProps {
 
 const POPOVER = "popover";
 
-const popoverState = () => listState<PopoverProps, { render(Button: PopoverProps["Button"], channel: Channel, message: Message): ReactElement; }>(POPOVER, (_, render) => ({
+const popoverState = () => listState<PopoverProps, { render(Button: PopoverProps["Button"], channel: Channel, message: Message): ReactElement; }>(POPOVER, render => ({
     render: (Button, channel, message) => render({ Button, channel, message }),
 }));
 
 export const popover = {
     /** Put these in the plugin's `patches` */
     patches: [onDemand({
-        // The hover bar lists the Shift-only buttons first, then the rest (checked 2026-11-04):
+        // The hover bar lists the Shift-only buttons first, then the rest (checked 2026-11-05):
         //   children:[x?(0,a.jsxs)(a.Fragment,{children:[l&&N?(0,a.jsx)(ni.qv,{label:…,icon:tP.L,onClick:e=>(0,t_.DT)(t,n,e)},"copy-id"):null, … ,"reply-self"):null]}):null,h?…
         // The call goes right after the Shift-only group, with the button component, channel and message from the copy-id button.
         find: ",\"copy-id\")",
@@ -216,16 +216,16 @@ export interface AccessoryProps {
 
 const ACCESSORIES = "accessories";
 
-const accessoriesState = () => listState<AccessoryProps, { render(props: AccessoryProps): ReactElement; }>(ACCESSORIES, (_, render) => ({
+const accessoriesState = () => listState<AccessoryProps, { render(props: AccessoryProps): ReactElement; }>(ACCESSORIES, render => ({
     render: props => render({ message: props.message, channel: props.channel }),
 }));
 
 export const accessories = {
     /** Put these in the plugin's `patches` */
     patches: [onDemand({
-        // The accessories under a message are one array (checked 2026-11-04):
+        // The accessories under a message are one array (checked 2026-11-05):
         //   children:[k,S,v,T,R,d,c,j,u,m,h,b,g,f,E,C,_,a,p,A,x,l&&this.renderSuppressConfirmModal(),r&&this.renderRemoveAttachmentConfirmModal(),I,y,N]
-        // The call goes after the confirm dialogs, before the safety notices. Discord hides the container while it's empty.
+        // The call goes after the confirm dialogs, before the safety notices. `this.props` holds the message and its channel.
         find: "renderSuppressConfirmModal",
         replace: {
             match: /(?<=\i&&this\.renderRemoveAttachmentConfirmModal\(\))/,

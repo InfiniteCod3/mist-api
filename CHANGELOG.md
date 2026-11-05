@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - Debug reports for users who can't run the CLI: `mist.report()` returns a report with the plugin, mist-api, Evi and Discord versions, the plugin's status, and its recent page and native logs and calls. Every recorded value shows as its type and size only. `mist.copyReport()` copies it and toasts the result, for a button in `settingsPanel`, and `mist.reportCommand()` is a slash command for `ctx.command` that copies it, or shows it when copying fails.
 - A `stores` getter that reads a missing store during the synchronous part of a plugin's `start` is a warning: `mist.log.warn` prints it once, naming the store and `subscribe(["StoreName"], …)` or `useStore("StoreName", …)` as the fix, and `HandleState.warnings` lists it for the run. Evi starts plugins before Discord makes many stores, so such a read gets `undefined` and code built on it does nothing.

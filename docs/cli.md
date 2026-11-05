@@ -92,7 +92,7 @@ mist status
 Reads `window.Mist.status()`. Each plugin gets one line, followed by its start error from Evi, if any, and its patch and lookup health:
 
 ```text
-weather-demo  running  mist 0.2.1  native: mist (debug open)  errors: 0 calls, 0 logs
+weather-demo  running  mist 0.3.0  native: mist (debug open)  errors: 0 calls, 0 logs
   registry: registered 2 times, 1 replacing another handle (a hot reload replaces one)
   patches: 2 applied
   lookups: none

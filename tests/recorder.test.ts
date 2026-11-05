@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 
 import { createMist } from "../src/index";
 import { createRecorder } from "../src/recorder";
-import { fakeContext, mistNative, settle } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative, settle } from "./helpers";
 
 test("secretArgs masks a method's positional arguments in every view, and leaves an empty one as it is", async () => {
     for (const keepValues of [true, false]) {
@@ -27,7 +28,7 @@ type Auth = { login(user: string, code: string, attempt: number): Promise<boolea
 
 test("createMist's secretArgs masks the page's record of the call, and names only the native side's methods", async () => {
     const mist = createMist<{}, Auth>("t-secret-args", { secretArgs: { login: [1] } });
-    mist.define({}).start!(fakeContext(mistNative(false, { login: () => true }), {}, "t-secret-args").ctx);
+    mist.define({}).start!(fakeContext({ native: mistNative(false, { login: () => true }), id: "t-secret-args" }).ctx);
     expect(await mist.native.login("ada", "one-time-code", 5)).toBe(true);
     await settle();
     const handle = (globalThis as any).Mist.get("t-secret-args");
@@ -58,7 +59,7 @@ test("quiet methods are counted, not kept, so a long poll doesn't fill the ring;
 test("createMist's quiet counts show in the plugin's state, and name only the native side's methods", async () => {
     type Desk = { poll(cursor: number): Promise<number>; send(text: string): Promise<void>; };
     const mist = createMist<{}, Desk>("t-quiet", { quiet: ["poll"] });
-    mist.define({}).start!(fakeContext(mistNative(false, { poll: (n: number) => n + 1 }), {}, "t-quiet").ctx);
+    mist.define({}).start!(fakeContext({ native: mistNative(false, { poll: (n: number) => n + 1 }), id: "t-quiet" }).ctx);
     await mist.native.poll(0);
     await mist.native.poll(1);
     const handle = (globalThis as any).Mist.get("t-quiet");

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { createMist } from "../src/index";
 import { registry } from "../src/registry";
 import { copyOfSources } from "./copies";
-import { fakeContext, mistNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative } from "./helpers";
 
 const copy = copyOfSources("0.2.9-other");
 const other: typeof import("../src/index") = await import(join(copy.dir, "index.ts"));
@@ -31,20 +32,20 @@ const warnings = (id: string) => (globalThis as any).Mist.get(id).state().warnin
 test("a needed plugin that provides an older version is a warning, a log line and one toast naming the plugin to update", () => {
     const evi = fakeEvi({ "t-feed-old": { name: "Weather Feed" } });
     const provider = other.createMist("t-feed-old", { provides: { "weather-feed": 1 } });
-    provider.define({}).start!(fakeContext(mistNative(false), {}, "t-feed-old").ctx);
+    provider.define({}).start!(fakeContext({ native: mistNative(false), id: "t-feed-old" }).ctx);
 
     const mist = createMist("t-needs-old", { needs: [{ plugin: "t-feed-old", protocol: "weather-feed", version: 2 }] });
     const definition = mist.define({});
-    const run = fakeContext(mistNative(false), {}, "t-needs-old");
+    const run = fakeContext({ native: mistNative(false), id: "t-needs-old" });
     definition.start!(run.ctx);
     expect(warnings("t-needs-old")).toEqual(["Weather Feed (t-feed-old) provides weather-feed version 1, and t-needs-old speaks version 2: update Weather Feed"]);
-    expect(run.printed.filter(p => p.level === "warn").map(p => p.args[0])).toEqual(warnings("t-needs-old"));
+    expect(run.logs.filter(p => p.level === "warn").map(p => p.args[0])).toEqual(warnings("t-needs-old"));
     expect(run.toasts).toEqual(["t-needs-old needs a newer version of Weather Feed. Update Weather Feed to use them together."]);
 
     evi.changed();
     run.dispose();
     expect(evi.listeners.size).toBe(0);
-    const again = fakeContext(mistNative(false), {}, "t-needs-old");
+    const again = fakeContext({ native: mistNative(false), id: "t-needs-old" });
     definition.start!(again.ctx);
     expect(warnings("t-needs-old")).toHaveLength(1);
     expect(again.toasts).toEqual([]);
@@ -55,7 +56,7 @@ test("a needed plugin whose copy of mist says nothing about what it provides is 
     // An older copy's handle: no `provides`
     registry().register({ id: "t-feed-silent", mistVersion: "0.2.1", state: () => ({ running: true }) } as any);
     const mist = createMist("t-needs-silent", { needs: [{ plugin: "t-feed-silent", protocol: "notes", version: 1 }] });
-    const run = fakeContext(mistNative(false), {}, "t-needs-silent");
+    const run = fakeContext({ native: mistNative(false), id: "t-needs-silent" });
     mist.define({}).start!(run.ctx);
     expect(warnings("t-needs-silent")).toEqual(["Notes Sync (t-feed-silent) doesn't say it provides notes, and t-needs-silent speaks version 1: update Notes Sync"]);
     expect(run.toasts).toHaveLength(1);
@@ -64,7 +65,7 @@ test("a needed plugin whose copy of mist says nothing about what it provides is 
 test("a needed plugin that provides a newer version says to update this plugin", () => {
     fakeEvi({ "t-feed-new": { name: "Weather Feed" } });
     other.createMist("t-feed-new", { provides: { "weather-feed": 3 } }).define({});
-    const run = fakeContext(mistNative(false), {}, "t-needs-new");
+    const run = fakeContext({ native: mistNative(false), id: "t-needs-new" });
     createMist("t-needs-new", { needs: [{ plugin: "t-feed-new", protocol: "weather-feed", version: 2 }] }).define({}).start!(run.ctx);
     expect(warnings("t-needs-new")[0]).toMatch(/version 3, and t-needs-new speaks version 2: update t-needs-new$/);
     expect(run.toasts).toEqual(["Weather Feed is newer than t-needs-new supports. Update t-needs-new to use them together."]);
@@ -73,10 +74,10 @@ test("a needed plugin that provides a newer version says to update this plugin",
 test("copies at different versions meet on the same protocol version, and an update of the other plugin clears the warning", () => {
     const evi = fakeEvi({ "t-feed-update": { name: "Weather Feed" } });
     const before = other.createMist("t-feed-update", { provides: { "weather-feed": 1 } });
-    const run = fakeContext(mistNative(false), {}, "t-feed-update");
+    const run = fakeContext({ native: mistNative(false), id: "t-feed-update" });
     before.define({}).start!(run.ctx);
     const mist = createMist("t-needs-update", { needs: [{ plugin: "t-feed-update", protocol: "weather-feed", version: 2 }] });
-    mist.define({}).start!(fakeContext(mistNative(false), {}, "t-needs-update").ctx);
+    mist.define({}).start!(fakeContext({ native: mistNative(false), id: "t-needs-update" }).ctx);
     expect(warnings("t-needs-update")).toHaveLength(1);
 
     // The user updates it: Evi stops the old run, then the new code registers
@@ -89,7 +90,7 @@ test("copies at different versions meet on the same protocol version, and an upd
 
 test("a needed plugin that isn't installed, or that Evi hasn't evaluated because it is off, isn't judged", () => {
     fakeEvi({ "t-feed-off": { name: "Off", evaluated: false } });
-    const run = fakeContext(mistNative(false), {}, "t-needs-none");
+    const run = fakeContext({ native: mistNative(false), id: "t-needs-none" });
     createMist("t-needs-none", {
         needs: [{ plugin: "t-feed-missing", protocol: "a", version: 1 }, { plugin: "t-feed-off", protocol: "b", version: 1 }],
     }).define({}).start!(run.ctx);

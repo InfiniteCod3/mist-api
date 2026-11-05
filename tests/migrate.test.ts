@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 
 import { createMist, SETTINGS_VERSION } from "../src/index";
-import { fakeContext, mistNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative } from "./helpers";
 
 const settings = {
     city: { type: "string", label: "City", default: "" },
@@ -22,13 +23,13 @@ test("migrations run once each, in order of `to`, before start, and the version 
     expect(definition.migrate).toBeUndefined();
 
     // Stored by the plugin's previous version, under keys its schema no longer declares
-    const stored: Record<string, unknown> = { town: "Berlin", fahrenheit: true };
-    definition.start!(fakeContext(mistNative(false), stored).ctx);
+    const stored: Record<string, any> = { town: "Berlin", fahrenheit: true };
+    definition.start!(fakeContext({ native: mistNative(false), schema: settings, settings: stored }).ctx);
     expect(ran).toEqual(["1", "2", "start Berlin imperial"]);
     expect(stored[SETTINGS_VERSION]).toBe(2);
 
     ran.length = 0;
-    definition.start!(fakeContext(mistNative(false), stored).ctx);
+    definition.start!(fakeContext({ native: mistNative(false), schema: settings, settings: stored }).ctx);
     expect(ran).toEqual(["start Berlin imperial"]);
 });
 
@@ -36,8 +37,8 @@ test("only the steps above the stored version run", () => {
     const mist = createMist<typeof settings>("t-migrate-partial");
     const ran: number[] = [];
     const definition = mist.define({ settings, migrate: [1, 2, 3].map(to => ({ to, run: () => void ran.push(to) })) });
-    const stored: Record<string, unknown> = { [SETTINGS_VERSION]: 2 };
-    definition.start!(fakeContext(mistNative(false), stored).ctx);
+    const stored: Record<string, any> = { [SETTINGS_VERSION]: 2 };
+    definition.start!(fakeContext({ native: mistNative(false), schema: settings, settings: stored }).ctx);
     expect(ran).toEqual([3]);
     expect(stored[SETTINGS_VERSION]).toBe(3);
 });
@@ -55,19 +56,19 @@ test("a migration that throws is logged and in status, the steps after it wait, 
         ],
         start() { ran.push("start"); },
     });
-    const stored: Record<string, unknown> = {};
-    const run = fakeContext(mistNative(false), stored);
+    const stored: Record<string, any> = {};
+    const run = fakeContext({ native: mistNative(false), schema: settings, settings: stored });
     definition.start!(run.ctx);
     expect(ran).toEqual(["1", "start"]);
     expect(stored[SETTINGS_VERSION]).toBe(1);
-    expect(run.printed.find(p => p.level === "error")?.args[0]).toMatch(/migration to 2 threw/);
+    expect(run.logs.find(p => p.level === "error")?.args[0]).toMatch(/migration to 2 threw/);
     const Mist = (globalThis as any).Mist;
     expect(Mist.get("t-migrate-throws").state().warnings).toEqual([expect.stringMatching(/migration to 2 threw/)]);
 
     run.dispose();
     broken = false;
     ran.length = 0;
-    definition.start!(fakeContext(mistNative(false), stored).ctx);
+    definition.start!(fakeContext({ native: mistNative(false), schema: settings, settings: stored }).ctx);
     expect(ran).toEqual(["2", "3", "start"]);
     expect(stored[SETTINGS_VERSION]).toBe(3);
     expect(Mist.get("t-migrate-throws").state().warnings).toEqual([]);

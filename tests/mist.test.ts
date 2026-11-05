@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 
 import { createMist } from "../src/index";
 import { defineNative } from "../src/native";
-import { fakeContext, mistNative, settle } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative, settle } from "./helpers";
 
 type Native = {
     add(a: number, b: number): number;
@@ -20,7 +21,7 @@ test("define keeps mist.ctx from start until the run is disposed, and runs the p
     expect(mist.running).toBe(false);
     expect(() => mist.ctx).toThrow(/t-define isn't running/);
 
-    const run = fakeContext(mistNative(false));
+    const run = fakeContext({ native: mistNative(false) });
     definition.start!(run.ctx);
     expect(mist.running).toBe(true);
     expect(mist.ctx).toBe(run.ctx);
@@ -36,8 +37,8 @@ test("define keeps mist.ctx from start until the run is disposed, and runs the p
 test("a late dispose of an old run doesn't clear the newer run", () => {
     const mist = createMist("t-rerun");
     const definition = mist.define({});
-    const first = fakeContext(mistNative(false));
-    const second = fakeContext(mistNative(false));
+    const first = fakeContext({ native: mistNative(false) });
+    const second = fakeContext({ native: mistNative(false) });
     definition.start!(first.ctx);
     definition.start!(second.ctx);
     first.dispose();
@@ -47,10 +48,10 @@ test("a late dispose of an old run doesn't clear the newer run", () => {
 test("mist.native calls the native side and records each call's outcome", async () => {
     const mist = createMist<{}, Native>("t-native");
     const definition = mist.define({});
-    const run = fakeContext(mistNative(true, {
+    const run = fakeContext({ native: mistNative(true, {
         add: (a: number, b: number) => a + b,
         fail: () => { throw new Error("nope"); },
-    }));
+    }) });
     definition.start!(run.ctx);
 
     expect(await mist.native.add(2, 3)).toBe(5);
@@ -76,7 +77,7 @@ const generic = () => defineNative({
 
 test("a generic native method that returns a promise keeps its type parameters on mist.native", async () => {
     const mist = createMist<{}, ReturnType<typeof generic>>("t-generic");
-    mist.define({}).start!(fakeContext(mistNative(false, { invoke: (c: string, a: number[]) => c === "add" ? a[0] + a[1] : "mist", sync: (n: number) => n })).ctx);
+    mist.define({}).start!(fakeContext({ native: mistNative(false, { invoke: (c: string, a: number[]) => c === "add" ? a[0] + a[1] : "mist", sync: (n: number) => n }) }).ctx);
     const sum: number = await mist.native.invoke("add", [1, 2]);
     const name: string = await mist.native.invoke("name", []);
     // @ts-expect-error add's arguments are numbers
@@ -104,27 +105,27 @@ test("mist.log prints through ctx.logger while running and keeps every line", ()
     const mist = createMist("t-log");
     const definition = mist.define({});
     mist.log.info("before start");
-    const run = fakeContext(mistNative(false), {}, "t-log");
+    const run = fakeContext({ native: mistNative(false), id: "t-log" });
     definition.start!(run.ctx);
     mist.log.warn("while running", 1);
-    expect(run.printed).toEqual([{ level: "warn", args: ["while running", 1] }]);
+    expect(run.logs).toEqual([{ level: "warn", args: ["while running", 1] }]);
     const logs = (globalThis as any).Mist.get("t-log").logs();
     expect(logs.map((l: any) => [l.level, l.args[0]])).toEqual([["info", "string(12)"], ["warn", "string(13)"]]);
 });
 
 test("mist.log.log prints through ctx.logger.log and is kept at level log, as Vencord's Logger.log", () => {
     const mist = createMist("t-log-log");
-    const run = fakeContext(mistNative(false), {}, "t-log-log");
+    const run = fakeContext({ native: mistNative(false), id: "t-log-log" });
     mist.define({}).start!(run.ctx);
     mist.log.log("plain line");
-    expect(run.printed).toEqual([{ level: "log", args: ["plain line"] }]);
+    expect(run.logs).toEqual([{ level: "log", args: ["plain line"] }]);
     expect((globalThis as any).Mist.get("t-log-log").logs().map((l: any) => l.level)).toEqual(["log"]);
 });
 
 test("safe returns the fallback and logs each distinct error once", () => {
     const mist = createMist("t-safe");
     const definition = mist.define({});
-    const run = fakeContext(mistNative(false), {}, "t-safe");
+    const run = fakeContext({ native: mistNative(false), id: "t-safe" });
     definition.start!(run.ctx);
     const parse = mist.safe((n: number) => {
         if (n < 0) throw new Error("negative");
@@ -136,17 +137,17 @@ test("safe returns the fallback and logs each distinct error once", () => {
     expect(parse(-5)).toBe(-1);
     expect(parse(-6)).toBe(-1);
     expect(parse(0)).toBe(-1);
-    expect(run.printed.filter(p => p.level === "error")).toHaveLength(2);
+    expect(run.logs.filter(p => p.level === "error")).toHaveLength(2);
 });
 
 test("warns when createMist's id isn't the id Evi runs the plugin as", () => {
     const mist = createMist("t-typo");
-    const run = fakeContext(mistNative(false), {}, "t-real");
+    const run = fakeContext({ native: mistNative(false), id: "t-real" });
     mist.define({}).start!(run.ctx);
-    expect(run.printed).toEqual([{ level: "warn", args: [expect.stringContaining("Use the id from manifest.json")] }]);
-    const quiet = fakeContext(mistNative(false), {}, "t-typo");
+    expect(run.logs).toEqual([{ level: "warn", args: [expect.stringContaining("Use the id from manifest.json")] }]);
+    const quiet = fakeContext({ native: mistNative(false), id: "t-typo" });
     mist.define({}).start!(quiet.ctx);
-    expect(quiet.printed).toEqual([]);
+    expect(quiet.logs).toEqual([]);
 });
 
 test("safe keeps `this` for patch callbacks", () => {
@@ -158,9 +159,9 @@ test("safe keeps `this` for patch callbacks", () => {
 /** A started plugin, for safe's log lines */
 function running(id: string) {
     const mist = createMist(id);
-    const run = fakeContext(mistNative(false), {}, id);
+    const run = fakeContext({ native: mistNative(false), id });
     mist.define({}).start!(run.ctx);
-    return { mist, errors: () => run.printed.filter(p => p.level === "error").map(p => p.args[0]) };
+    return { mist, errors: () => run.logs.filter(p => p.level === "error").map(p => p.args[0]) };
 }
 
 test("safe's fallback can be a function of the same arguments and `this`, as Discord's own value", () => {

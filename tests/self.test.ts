@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 
 import { createMist } from "../src/index";
-import { fakeContext, mistNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative } from "./helpers";
 
 const Mist = () => (globalThis as any).Mist;
-const start = (id: string) => fakeContext(mistNative(false), {}, id);
-const warns = (run: ReturnType<typeof fakeContext>) => run.printed.filter(p => p.level === "warn").map(p => p.args[0]);
+const start = (id: string) => fakeContext({ native: mistNative(false), id });
+const warns = (run: ReturnType<typeof fakeContext>) => run.logs.filter(p => p.level === "warn").map(p => p.args[0]);
 
 test("a $self name the definition has no function for is a warning, logged once and listed for each run", () => {
     const mist = createMist("t-self-typo");

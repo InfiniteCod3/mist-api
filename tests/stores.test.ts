@@ -3,56 +3,13 @@ import * as React from "react";
 import { act, create } from "react-test-renderer";
 
 import type { ChangeSource } from "../src/stores";
+import { fakeEvi, fakeStore } from "../src/testing";
 
-const found = new Map<string, unknown>();
-/** Evi's findStore throws while Discord's webpack isn't there yet */
-let webpackReady = true;
-const looked: string[] = [];
-/** Evi's waitFor: called back at once for a store that exists, else when arrive() makes it */
-const waiting = new Set<{ name: string; callback: (store: unknown) => void; }>();
-function arrive(name: string, store: unknown) {
-    found.set(name, store);
-    for (const waiter of [...waiting]) if (waiter.name === name) {
-        waiting.delete(waiter);
-        waiter.callback(store);
-    }
-}
-mock.module("@evi/api", () => ({
-    React,
-    findStore: (name: string) => {
-        looked.push(name);
-        if (!webpackReady) throw new Error("webpack isn't ready");
-        return found.get(name);
-    },
-    filters: { byStoreName: (name: string) => ({ store: name }) },
-    waitFor: (filter: { store: string; }, callback: (store: unknown) => void) => {
-        const existing = found.get(filter.store);
-        if (existing) {
-            callback(existing);
-            return () => { };
-        }
-        const waiter = { name: filter.store, callback };
-        waiting.add(waiter);
-        return () => void waiting.delete(waiter);
-    },
-}));
+const evi = fakeEvi({ React });
+mock.module("@evi/api", () => evi.module);
 const { currentUserId, isStreamerMode, stores, subscribe, useStore } = await import("../src/stores");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean; }).IS_REACT_ACT_ENVIRONMENT = true;
-
-/** A Flux store: listeners, and a change() that notifies them */
-function fakeStore<T extends object>(state: T) {
-    const listeners = new Set<() => void>();
-    return Object.assign(state, {
-        addChangeListener: (l: () => void) => void listeners.add(l),
-        removeChangeListener: (l: () => void) => void listeners.delete(l),
-        change(next: Partial<T>) {
-            Object.assign(state, next);
-            for (const l of [...listeners]) l();
-        },
-        listeners,
-    });
-}
 
 test("re-renders when the store changes, and stops listening on unmount", () => {
     const store = fakeStore({ name: "a" });
@@ -124,53 +81,53 @@ test("listens to every store in a list, and to a store that shows up later", () 
 test("store getters look the store up when read", () => {
     expect(stores.user).toBeUndefined();
     expect(currentUserId()).toBeUndefined();
-    found.set("UserStore", { getCurrentUser: () => ({ id: "42" }) });
+    evi.addStore("UserStore", { getCurrentUser: () => ({ id: "42" }) });
     expect(currentUserId()).toBe("42");
 });
 
 test("a UserStore without getCurrentUser gives no id, and the type makes callers check", () => {
-    found.set("UserStore", {});
+    evi.addStore("UserStore", {});
     expect(currentUserId()).toBeUndefined();
     // @ts-expect-error getCurrentUser may be missing: call it with ?.()
     expect(() => stores.user!.getCurrentUser()).toThrow();
 });
 
 test("store getters and currentUserId give undefined while webpack isn't ready, and look again next time", () => {
-    found.set("UserStore", { getCurrentUser: () => ({ id: "7" }) });
-    webpackReady = false;
+    evi.addStore("UserStore", { getCurrentUser: () => ({ id: "7" }) });
+    evi.ready = false;
     expect(stores.user).toBeUndefined();
     expect(currentUserId()).toBeUndefined();
-    webpackReady = true;
+    evi.ready = true;
     expect(currentUserId()).toBe("7");
 });
 
-test("presence and sessions are looked up by Discord's store names", () => {
+test("presence and sessions are evi.lookups up by Discord's store names", () => {
     const presence = { getClientStatus: () => ({ desktop: "online" }) };
-    found.set("PresenceStore", presence);
-    looked.length = 0;
+    evi.addStore("PresenceStore", presence);
+    evi.lookups.length = 0;
     expect(stores.presence).toBe(presence as never);
     expect(stores.sessions).toBeUndefined();
-    expect(looked).toEqual(["PresenceStore", "SessionsStore"]);
+    expect(evi.lookups).toEqual(["PresenceStore", "SessionsStore"]);
 });
 
 test("streamerMode is Discord's StreamerModeStore, and isStreamerMode reads each shape Discord builds have had", () => {
-    found.delete("StreamerModeStore");
+    evi.removeStore("StreamerModeStore");
     expect(isStreamerMode()).toBe(false);
     const getter = { enabled: true };
-    found.set("StreamerModeStore", getter);
-    looked.length = 0;
+    evi.addStore("StreamerModeStore", getter);
+    evi.lookups.length = 0;
     expect(stores.streamerMode).toBe(getter as never);
-    expect(looked).toEqual(["StreamerModeStore"]);
+    expect(evi.lookups).toEqual(["StreamerModeStore"]);
     expect(isStreamerMode()).toBe(true);
-    found.set("StreamerModeStore", { isEnabled: () => true });
+    evi.addStore("StreamerModeStore", { isEnabled: () => true });
     expect(isStreamerMode()).toBe(true);
-    found.set("StreamerModeStore", { getState: () => ({ enabled: true }) });
+    evi.addStore("StreamerModeStore", { getState: () => ({ enabled: true }) });
     expect(isStreamerMode()).toBe(true);
-    found.set("StreamerModeStore", { enabled: false, isEnabled: () => false, getState: () => ({}) });
+    evi.addStore("StreamerModeStore", { enabled: false, isEnabled: () => false, getState: () => ({}) });
     expect(isStreamerMode()).toBe(false);
-    webpackReady = false;
+    evi.ready = false;
     expect(isStreamerMode()).toBe(false);
-    webpackReady = true;
+    evi.ready = true;
 });
 
 test("subscribe calls the listener on each store's change until unsubscribed", () => {
@@ -204,7 +161,7 @@ test("a store named before Discord makes it is listened to once it exists, and t
     const unsubscribe = subscribe(["TLateStore"], () => heard++);
     expect(heard).toBe(0);
     const late = fakeStore({});
-    arrive("TLateStore", late);
+    evi.addStore("TLateStore", late);
     expect(heard).toBe(1);
     late.change({});
     expect(heard).toBe(2);
@@ -216,7 +173,7 @@ test("a store named before Discord makes it is listened to once it exists, and t
 
 test("a store named that already exists is listened to at once, without an extra call", () => {
     const store = fakeStore({});
-    arrive("TReadyStore", store);
+    evi.addStore("TReadyStore", store);
     let heard = 0;
     const unsubscribe = subscribe("TReadyStore", () => heard++);
     expect(heard).toBe(0);
@@ -230,7 +187,7 @@ test("unsubscribing before a named store exists stops the wait", () => {
     let heard = 0;
     subscribe("TNeverStore", () => heard++)();
     const store = fakeStore({});
-    arrive("TNeverStore", store);
+    evi.addStore("TNeverStore", store);
     store.change({});
     expect(heard).toBe(0);
     expect(store.listeners.size).toBe(0);
@@ -238,14 +195,14 @@ test("unsubscribing before a named store exists stops the wait", () => {
 
 test("useStore re-renders when a store it names arrives", () => {
     function Name() {
-        const name = useStore("TNamedStore", () => (found.get("TNamedStore") as { name?: string; } | undefined)?.name ?? "none");
+        const name = useStore("TNamedStore", () => (evi.module.findStore("TNamedStore") as { name?: string; } | undefined)?.name ?? "none");
         return React.createElement("span", null, name);
     }
     let root!: ReturnType<typeof create>;
     act(() => { root = create(React.createElement(Name)); });
     expect(root.toJSON()).toMatchObject({ children: ["none"] });
     const store = fakeStore({ name: "here" });
-    act(() => arrive("TNamedStore", store));
+    act(() => evi.addStore("TNamedStore", store));
     expect(root.toJSON()).toMatchObject({ children: ["here"] });
     act(() => store.change({ name: "changed" }));
     expect(root.toJSON()).toMatchObject({ children: ["changed"] });
@@ -278,37 +235,38 @@ test("useStore and subscribe take a plugin's own change source", () => {
 });
 
 const { createMist } = await import("../src/index");
-const { fakeContext, mistNative, settle } = await import("./helpers");
+const { fakeContext } = await import("../src/testing");
+const { mistNative, settle } = await import("./helpers");
 
 test("a store read in start before Discord made it is a warning for that plugin: logged once, in its status each run", () => {
-    found.delete("PresenceStore");
+    evi.removeStore("PresenceStore");
     const mist = createMist("t-early-read");
     const listened: unknown[] = [];
     const definition = mist.define({
         start(ctx) { ctx.onDispose(subscribe([stores.presence], () => listened.push("change"))); },
     });
-    const first = fakeContext(mistNative(false), {}, "t-early-read");
+    const first = fakeContext({ native: mistNative(false), id: "t-early-read" });
     definition.start!(first.ctx);
     const warnings = () => (globalThis as any).Mist.get("t-early-read").state().warnings;
     expect(warnings()).toEqual([expect.stringContaining('PresenceStore before Discord made it')]);
     expect(warnings()[0]).toContain('subscribe(["PresenceStore"], …)');
-    expect(first.printed.filter(p => p.level === "warn").map(p => p.args[0])).toEqual(warnings());
+    expect(first.logs.filter(p => p.level === "warn").map(p => p.args[0])).toEqual(warnings());
 
     first.dispose();
-    const second = fakeContext(mistNative(false), {}, "t-early-read");
+    const second = fakeContext({ native: mistNative(false), id: "t-early-read" });
     definition.start!(second.ctx);
     expect(warnings()).toHaveLength(1);
-    expect(second.printed.filter(p => p.level === "warn")).toEqual([]);
+    expect(second.logs.filter(p => p.level === "warn")).toEqual([]);
 
     second.dispose();
-    arrive("PresenceStore", fakeStore({}));
-    definition.start!(fakeContext(mistNative(false), {}, "t-early-read").ctx);
+    evi.addStore("PresenceStore", fakeStore({}));
+    definition.start!(fakeContext({ native: mistNative(false), id: "t-early-read" }).ctx);
     expect(warnings()).toEqual([]);
 });
 
 test("only the synchronous part of start is watched, only the starting plugin is blamed, and a store named to subscribe isn't a read", async () => {
-    found.delete("SessionsStore");
-    found.delete("MultiAccountStore");
+    evi.removeStore("SessionsStore");
+    evi.removeStore("MultiAccountStore");
     const mine = createMist("t-start-sync");
     const other = createMist("t-start-other");
     const definition = mine.define({
@@ -319,7 +277,7 @@ test("only the synchronous part of start is watched, only the starting plugin is
         },
     });
     other.define({});
-    const started = definition.start!(fakeContext(mistNative(false)).ctx);
+    const started = definition.start!(fakeContext({ native: mistNative(false) }).ctx);
     void stores.multiAccount;
     await started;
     const Mist = (globalThis as any).Mist;

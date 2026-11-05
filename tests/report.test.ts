@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 
 import { createMist, MIST_VERSION } from "../src/index";
-import { fakeContext, mistNative, settle } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative, settle } from "./helpers";
 
 afterEach(() => {
     delete (globalThis as any).Evi;
@@ -21,7 +22,7 @@ function page(clipboard?: (text: string) => Promise<void>) {
 async function reporting() {
     type Native = { lookup(place: { city: string; }): { temperature: number; }; };
     const mist = createMist<{}, Native>("t-report");
-    const run = fakeContext(mistNative(true, { lookup: () => ({ temperature: 21 }) }), { apiToken: "hidden-token" }, "t-report");
+    const run = fakeContext({ native: mistNative(true, { lookup: () => ({ temperature: 21 }) }), settings: { apiToken: "hidden-token" }, id: "t-report" });
     mist.define({}).start!(run.ctx);
     await mist.native.lookup({ city: "Berlin" });
     mist.log.warn("forecast for Berlin is stale", { apiToken: "hidden-token" });

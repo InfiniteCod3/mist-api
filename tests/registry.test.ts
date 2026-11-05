@@ -2,8 +2,9 @@ import { afterAll, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { createMist, MIST_VERSION } from "../src/index";
+import { fakeContext } from "../src/testing";
 import { copyOfSources } from "./copies";
-import { fakeContext, mistNative } from "./helpers";
+import { mistNative } from "./helpers";
 
 const copy = copyOfSources("0.0.1-old");
 const old: typeof import("../src/index") = await import(join(copy.dir, "index.ts"));
@@ -14,8 +15,8 @@ test("plugins on two copies at different versions share one window.Mist, each an
     const other = old.createMist("t-other");
     const a = current.define({});
     const b = other.define({});
-    a.start!(fakeContext(mistNative(false)).ctx);
-    b.start!(fakeContext(mistNative(false)).ctx);
+    a.start!(fakeContext({ native: mistNative(false) }).ctx);
+    b.start!(fakeContext({ native: mistNative(false) }).ctx);
     other.log.error("from the other copy");
 
     const Mist = (globalThis as any).Mist;
@@ -120,7 +121,7 @@ const shared = () => (globalThis as any)[Symbol.for("mist-api.registry.v1")];
 
 test("page code can't put its own handle in place of a running plugin's", () => {
     const mist = createMist("t-swap-running");
-    mist.define({}).start!(fakeContext(mistNative(false), {}, "t-swap-running").ctx);
+    mist.define({}).start!(fakeContext({ native: mistNative(false), id: "t-swap-running" }).ctx);
     const own = shared().get("t-swap-running");
     shared().register(forged("t-swap-running", true))();
     shared().register(forged("t-swap-running", false));
@@ -135,7 +136,7 @@ test("a handle swapped in while the plugin was stopped is taken back at the plug
     const own = shared().get("t-swap-stopped");
     shared().register(forged("t-swap-stopped", false));
     expect(shared().get("t-swap-stopped")).not.toBe(own);
-    definition.start!(fakeContext(mistNative(false), {}, "t-swap-stopped").ctx);
+    definition.start!(fakeContext({ native: mistNative(false), id: "t-swap-stopped" }).ctx);
     expect(shared().get("t-swap-stopped")).toBe(own);
     expect(shared().history("t-swap-stopped")).toEqual({ registered: 3, replaced: 2, refused: 0, reclaimed: 1 });
     expect(shared().concerns("t-swap-stopped")).toEqual(["t-swap-stopped's handle was replaced while the plugin was stopped, and the plugin took it back at its next start"]);
@@ -153,10 +154,10 @@ test("a stand-in that says it runs keeps the id: the plugin warns, and the regis
     } finally {
         delete (globalThis as any).Evi;
     }
-    const run = fakeContext(mistNative(false), {}, "t-swap-squat");
+    const run = fakeContext({ native: mistNative(false), id: "t-swap-squat" });
     definition.start!(run.ctx);
     expect(shared().get("t-swap-squat")).toBe(squatter);
-    expect(run.printed.map(p => p.args[0])).toContain("Another handle holds t-swap-squat in the debug registry and says it is running, so `mist` can't reach this run");
+    expect(run.logs.map(p => p.args[0])).toContain("Another handle holds t-swap-squat in the debug registry and says it is running, so `mist` can't reach this run");
     expect(shared().concerns("t-swap-squat")).toEqual(["1 registration was refused while t-swap-squat's handle said it was running: two handles claim this id"]);
 });
 
@@ -164,11 +165,11 @@ test("a hot reload across copies at different versions replaces the handle once 
     for (const [first, second] of [[old, { createMist }], [{ createMist }, old]] as const) {
         const id = `t-reload-${first === old ? "up" : "down"}`;
         const before = first.createMist(id);
-        const run = fakeContext(mistNative(false), {}, id);
+        const run = fakeContext({ native: mistNative(false), id });
         before.define({}).start!(run.ctx);
         run.dispose();
         const after = second.createMist(id);
-        after.define({}).start!(fakeContext(mistNative(false), {}, id).ctx);
+        after.define({}).start!(fakeContext({ native: mistNative(false), id }).ctx);
         expect(shared().get(id).mistVersion).toBe(first === old ? MIST_VERSION : "0.0.1-old");
         expect(shared().history(id)).toEqual({ registered: 2, replaced: 1, refused: 0, reclaimed: 0 });
         expect(shared().concerns(id)).toEqual([]);

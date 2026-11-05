@@ -48,6 +48,11 @@
             "import": "./dist/discord.js",
             "default": "./dist/discord.js"
         },
+        "./testing": {
+            "types": "./dist/testing.d.ts",
+            "import": "./dist/testing.js",
+            "default": "./dist/testing.js"
+        },
         "./package.json": "./package.json"
     },
     "main": "./dist/index.js",

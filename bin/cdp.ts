@@ -91,7 +91,8 @@ export interface Connection {
     close(): void;
 }
 
-async function open(url: string, timeoutMs: number): Promise<Connection> {
+/** Opens a page target's websocket */
+export async function open(url: string, timeoutMs = 20_000): Promise<Connection> {
     const ws = new WebSocket(url);
     await new Promise<void>((resolve, reject) => {
         ws.addEventListener("open", () => resolve(), { once: true });

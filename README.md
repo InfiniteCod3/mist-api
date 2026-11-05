@@ -1,9 +1,11 @@
 # mist-api
 
-mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in six ways:
+mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in these ways:
 
 - Native calls are typed from the native module itself. `await mist.native.lookup(place)` gets its argument and result types from `native.ts`, so a renamed method or a changed argument fails the typecheck.
 - The native side can send events to the page. Evi's native side can't push, so `mist.events.subscribe` long-polls a channel made with `nativeEvents`, in order, and loads the page's state again after a restart.
+- Native calls keep their errors and can be cancelled. A `NativeError(code, data)` thrown in `native.ts` reaches the page as a `MistNativeError` with the same `code`, and `mist.native.method.with({ signal })` aborts the method's `this.signal`. Native code can also ask the page and wait for the answer with `nativeRequests` and `mist.requests.handle`.
+- The native side has a toolkit: `discordWindow()`, a `lifetime(ctx)` scope that kills child processes and clears timers on stop, `run` and `which`, `jsonFile` with atomic writes flushed on stop, `secrets` with Electron's `safeStorage`, and `pathGrants`, file dialog handles that keep page input from naming paths.
 - The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`. `mist.signal` aborts when the run stops, and `mist.toast` does nothing after it, so timers and promise callbacks need no `mist.running` check.
 - Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, a bus between plugins, and `mist.storage`, a key-value store in IndexedDB for each plugin and, if you want, each account.
 - `mist.define` checks the plugin's patches. A `$self` name in a patch that the definition has no function for is a warning in the log and in `mist status`, not a `TypeError` inside Discord's code.
@@ -282,6 +284,7 @@ The CLI shows the page's logs, calls, and values whole for every plugin. `mist c
 - [createMist](docs/core.md) is the page side of a plugin (`@aurologic/mist-api`).
 - [defineNative](docs/native.md) is the main-process side (`@aurologic/mist-api/native`).
 - [Events](docs/events.md) sends events from the native side to the page with `nativeEvents` and `mist.events.subscribe`.
+- [Native toolkit](docs/toolkit.md) has `discordWindow`, `lifetime`, `run`, `which`, `dataFolder`, `jsonFile`, `secrets`, and `pathGrants`.
 - [Stores](docs/stores.md) covers Discord's Flux stores and `useStore` (`@aurologic/mist-api/stores`).
 - [Util](docs/util.md) covers `isRecord`, `sleep`, `fetchWithTimeout`, `fetchJson`, `HttpError`, and the `DiscordNative` types (`@aurologic/mist-api/util`).
 - [Discord](docs/discord.md) covers accounts, Discord's API, navigation, avatars, the clipboard, formatting in Discord's language, and the message box (`@aurologic/mist-api/discord`).

@@ -135,7 +135,7 @@ What the context does:
 | `waitFor(filter, callback)` | Waits through `evi.module.waitFor`. `dispose()` stops the wait. |
 | `flux.subscribe(type, handler)` | Subscribes through `evi.module.Dispatcher`. A handler that throws is logged as an error, not thrown. `dispose()` unsubscribes. |
 | `flux.dispatch(action)` | Dispatches through `evi.module.Dispatcher`. |
-| `native.call(method, ...args)` | Calls the `native` option. |
+| `native.call(method, ...args)` | Calls the `native` option. `mist.native` first calls `__mist_protocol` once per run; a `native` that doesn't answer it with a number gets calls as Evi passes them, with no call mark. |
 | `addStyle(css)` | Adds the CSS to `styles` until `remove()` or `dispose()`. `update(css)` replaces it. |
 | `toast(message)` | Adds the message to `toasts`. |
 | `setInterval`, `setTimeout` | Real timers that `dispose()` clears. |

@@ -186,7 +186,7 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
     const requests = createRequests<RequestsOf<N>>({
         context: ctx,
         protocol: client.protocol,
-        poll: (context, boot, cursor) => recorder.track(HIDDEN.requests, [boot, cursor], () => context.native.call<EventsAnswer<RequestEvent>>(HIDDEN.requests, boot, cursor)),
+        poll: (context, boot, cursor) => recorder.track(HIDDEN.requests, [boot, cursor], () => context.native.call<EventsAnswer<RequestEvent> | null>(HIDDEN.requests, boot, cursor)),
         report: reportEvents,
     });
 

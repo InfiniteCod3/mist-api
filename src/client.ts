@@ -69,7 +69,7 @@ export function createNativeClient(source: ClientSource) {
             try {
                 asked = context.native.call(HIDDEN.protocol);
             } catch {
-                // Evi throws right away for a plugin without a native module; the call itself throws the same
+                // Evi throws synchronously for a plugin without a native module, and the real call will too
                 asked = Promise.resolve(0);
             }
             known = asked.then(answer => typeof answer === "number" ? answer : 0, () => 0);

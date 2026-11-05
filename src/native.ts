@@ -53,7 +53,7 @@ export type MistNative<M, E = never, R extends RequestMap<R> = {}> = M & {
     [HIDDEN.protocol](): number;
     [HIDDEN.abort](id?: unknown): boolean;
     /** Typed with R so the page can infer what `mist.requests.handle` takes */
-    [HIDDEN.requests](boot?: unknown, cursor?: unknown): Promise<EventsAnswer<RequestEvent> & { readonly __requests?: R; }>;
+    [HIDDEN.requests](boot?: unknown, cursor?: unknown): Promise<(EventsAnswer<RequestEvent> & { readonly __requests?: R; }) | null>;
     [HIDDEN.reply](id?: unknown, outcome?: unknown): boolean;
 };
 
@@ -188,7 +188,7 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
     module[HIDDEN.events] = (boot?: unknown, cursor?: unknown) => recorder.track(HIDDEN.events, [boot, cursor], () =>
         channel ? channel.poll(boot, cursor) : Promise.reject(new Error("This native module has no event channel: pass { events } to defineNative")));
     module[HIDDEN.requests] = (boot?: unknown, cursor?: unknown) => recorder.track(HIDDEN.requests, [boot, cursor], () =>
-        asks ? asks.poll(boot, cursor) : Promise.reject(new Error("This native module makes no requests: pass { requests } to defineNative")));
+        asks ? asks.poll(boot, cursor) : Promise.resolve(null));
     module[HIDDEN.reply] = (id?: unknown, outcome?: unknown) => asks?.reply(id, outcome) ?? false;
     module[HIDDEN.abort] = (id?: unknown) => {
         const controller = typeof id === "string" ? abortable.get(id) : undefined;

@@ -212,32 +212,35 @@ test("secrets are stored encrypted in the plugin's folder and read back; they re
     dispose();
     const file = join(dataDir, "plugin-data", "t-secrets", "mist-secrets.json");
     expect(readFileSync(file, "utf8")).not.toContain("k-very-secret");
-    expect(secrets(nativeContext("t-secrets", dataDir).ctx).get("apiKey")).toBe("k-very-secret");
+    const restarted = nativeContext("t-secrets", dataDir);
+    const again = secrets(restarted.ctx);
+    expect(again.get("apiKey")).toBe("k-very-secret");
 
-    expect(vault.delete("apiKey")).toBe(true);
-    expect(vault.delete("apiKey")).toBe(false);
-    expect(vault.get("constructor")).toBeUndefined();
-    vault.set("__proto__", "x");
-    expect(vault.get("__proto__")).toBe("x");
-    expect(() => vault.set("../x", "x")).toThrow(/Bad secret name/);
+    expect(again.delete("apiKey")).toBe(true);
+    expect(again.delete("apiKey")).toBe(false);
+    expect(again.get("constructor")).toBeUndefined();
+    again.set("__proto__", "x");
+    expect(again.get("__proto__")).toBe("x");
+    expect(() => again.set("../x", "x")).toThrow(/Bad secret name/);
 
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "linux" });
     try {
         electron.backend = "basic_text";
-        expect(vault.encrypted).toBe(false);
+        expect(again.encrypted).toBe(false);
         electron.backend = "gnome_libsecret";
-        expect(vault.encrypted).toBe(true);
+        expect(again.encrypted).toBe(true);
     } finally {
         Object.defineProperty(process, "platform", platform);
     }
     electron.encryptionAvailable = false;
     try {
-        expect(vault.encrypted).toBe(false);
-        expect(() => vault.set("apiKey", "x")).toThrow(expect.objectContaining({ code: "secrets-unavailable" }));
+        expect(again.encrypted).toBe(false);
+        expect(() => again.set("apiKey", "x")).toThrow(expect.objectContaining({ code: "secrets-unavailable" }));
     } finally {
         electron.encryptionAvailable = true;
     }
+    restarted.dispose();
 });
 
 test("path grants hand out opaque handles for what the person picked, resolve only on the native side, and stay inside a folder", async () => {
@@ -269,9 +272,11 @@ test("path grants hand out opaque handles for what the person picked, resolve on
     }
 
     dispose();
-    const later = pathGrants(nativeContext("t-grants", dataDir).ctx);
+    const restarted = nativeContext("t-grants", dataDir);
+    const later = pathGrants(restarted.ctx);
     expect(later.resolveGrant(file)).toBe(join(picked, "one.txt"));
     expect(later.revokeGrant(file)).toBe(true);
     expect(() => later.resolveGrant(file)).toThrow(expect.objectContaining({ code: "unknown-grant" }));
+    restarted.dispose();
     electron.windows = [];
 });

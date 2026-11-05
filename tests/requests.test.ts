@@ -104,13 +104,13 @@ test("an aborted request rejects with the signal's reason and is no longer deliv
     controller.abort();
     expect(await rejection(pending)).toMatchObject({ name: "AbortError" });
     const answer = await module.__mist_requests(null, 0);
-    expect(answer.events).toEqual([]);
+    expect(answer?.events).toEqual([]);
 });
 
 test("a reply for an unknown request, or in a bad shape, is refused", async () => {
     const { module } = await asking();
     const pending = module.ask("shape?");
-    const { events: [request] } = await module.__mist_requests(null, 0);
+    const [request] = (await module.__mist_requests(null, 0))!.events;
     expect(module.__mist_reply("not-an-id", { ok: true, value: true })).toBe(false);
     expect(module.__mist_reply(request.id, "yes")).toBe(false);
     expect(module.__mist_reply(request.id, { ok: true, value: false })).toBe(true);
@@ -129,5 +129,24 @@ test("a native side without requests support gets no polling from the page, whic
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(calls).not.toContain("__mist_requests");
     expect(run.logs.filter(p => p.level === "warn").map(p => String(p.args[0]))).toEqual([expect.stringContaining("needs defineNative from @aurologic/mist-api 0.3")]);
+    run.dispose();
+});
+
+test("a page handling requests from a native side made without them stops polling and says why once", async () => {
+    const copy = copyOfSources("0.0.1-no-asks");
+    removes.push(copy.remove);
+    const native = await import(join(copy.dir, "native.ts")) as typeof import("../src/native");
+    const module = native.defineNative({ ping: () => "pong" });
+    module.start({ pluginId: "t-no-asks" } as NativeContext);
+    const sent: { method: string; args: unknown[]; }[] = [];
+    const mist = createMist<{}, typeof module>("t-no-asks");
+    const run = fakeContext({ native: electronBridge(module, sent), id: "t-no-asks" });
+    mist.define({}).start!(run.ctx);
+    // @ts-expect-error a native module without requests takes no handlers
+    mist.requests.handle("anything", () => 1);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(sent.filter(s => s.method === "__mist_requests")).toHaveLength(1);
+    expect(run.logs.filter(p => p.level === "warn").map(p => String(p.args[0]))).toEqual([expect.stringContaining("pass { requests } from nativeRequests")]);
+    expect(await mist.native.ping()).toBe("pong");
     run.dispose();
 });

@@ -8,8 +8,8 @@ import { isRecord } from "./util.ts";
 type RequestFn = (payload: any) => unknown;
 
 /** The requests a native module makes, from its `__mist_requests` method's type */
-export type RequestsOf<N> = N extends Record<typeof HIDDEN.requests, (...args: any[]) => Promise<{ readonly __requests?: infer R; }>>
-    ? NonNullable<R> : {};
+export type RequestsOf<N> = N extends Record<typeof HIDDEN.requests, (...args: any[]) => Promise<infer A>>
+    ? NonNullable<A> extends { readonly __requests?: infer R; } ? NonNullable<R> : {} : {};
 
 export interface MistRequests<R> {
     /**
@@ -26,7 +26,8 @@ export interface MistRequests<R> {
 export interface RepliesSource {
     context(): PluginContext<any>;
     protocol(context: PluginContext<any>): Promise<number>;
-    poll(context: PluginContext<any>, boot: string | null, cursor: number): Promise<EventsAnswer<RequestEvent>>;
+    /** Null when the native side was made without `requests` */
+    poll(context: PluginContext<any>, boot: string | null, cursor: number): Promise<EventsAnswer<RequestEvent> | null>;
     report(line: string, err: unknown): void;
 }
 
@@ -61,9 +62,15 @@ export function createRequests<R>(source: RepliesSource): MistRequests<R> {
             source.report("mist.requests: the native side doesn't make requests; it needs defineNative from @aurologic/mist-api 0.3 or later", new Error("no __mist_protocol"));
             return;
         }
-        subscribe<RequestEvent>({
+        const off = subscribe<RequestEvent>({
             onDispose: fn => context.onDispose(fn),
-            poll: (boot, cursor) => source.poll(context, boot, cursor),
+            async poll(boot, cursor) {
+                const answer = await source.poll(context, boot, cursor);
+                if (answer) return answer;
+                source.report("mist.requests: the native side makes no requests; pass { requests } from nativeRequests to defineNative", new Error("no requests"));
+                off();
+                return { boot: "", cursor: 0, fresh: false, events: [] };
+            },
             report: source.report,
         }, request => {
             if (isRequest(request)) void answer(context, handlers, request);

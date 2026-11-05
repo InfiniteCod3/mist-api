@@ -360,6 +360,47 @@ The page side records every call, with its arguments, outcome, and time taken, f
 
 `mist.native` is a `Proxy`. Its `then` is `undefined`, so `await mist.native` returns `mist.native` itself instead of treating it as a promise. Every other property name gives a calling function at runtime, so a method that the native side doesn't have fails only when the call reaches Evi. The type `N` is what catches a wrong name.
 
+Errors keep their type when the native side is made with `defineNative` from mist-api 0.3 or later. A `NativeError` thrown there rejects the call with a `MistNativeError` with the same `code` and `data`, and an `HttpError` keeps its `status`. [NativeError](native.md#nativeerror) shows both sides. With an older or plain native side, a throw arrives as Electron makes it, a plain `Error` whose message starts with `Error invoking remote method`.
+
+```ts
+import { MistNativeError } from "@aurologic/mist-api";
+
+try {
+	await mist.native.readNote(name);
+} catch (err) {
+	if (err instanceof MistNativeError && err.code === "not-found") return null;
+	throw err;
+}
+```
+
+`mist.native.method.with({ signal })` returns the method with a signal. Aborting the signal rejects the call at once with the signal's reason. With a native side made with `defineNative` from mist-api 0.3 or later, it also aborts the method's `this.signal`, so the native work can stop. With another native side, the native method runs on and its answer is dropped. A signal that is already aborted rejects without calling the native side.
+
+```ts
+const controller = new AbortController();
+const pending = mist.native.download.with({ signal: controller.signal })(url);
+cancelButton.onclick = () => controller.abort();
+```
+
+The first call of each run asks the native side whether it speaks mist-api's call protocol, one extra call that isn't recorded. [How a call crosses IPC](native.md#how-a-call-crosses-ipc) explains it.
+
+### mist.requests
+
+```ts
+readonly requests: MistRequests<RequestsOf<N>>;
+
+interface MistRequests<R> {
+	handle<K extends keyof R>(name: K, handler: (payload: Parameters<R[K]>[0]) => Awaited<ReturnType<R[K]>> | Promise<Awaited<ReturnType<R[K]>>>): () => void;
+}
+```
+
+Answers the requests that the native side makes with [nativeRequests](native.md#nativerequests). `RequestsOf<N>` is the native module's request map, so the names and types come from `native.ts`. What `handler` returns or resolves with goes back to the waiting native code. A throw or rejection goes back as a failure with its message. Call `handle` while the plugin runs, as in `start`. Its handlers belong to the run and end with it. A second `handle` for a name replaces the first, and the returned function removes the handler.
+
+```ts
+mist.requests.handle("confirm", text => window.confirm(text));
+```
+
+The answer must survive a structured clone. One that doesn't is logged, and the native side gets a failure. The page starts polling for requests at the first `handle` of a run. A native side without requests support, older than mist-api 0.3 or not made with `defineNative`, gets no polls, and the page logs that once.
+
 ### mist.log
 
 ```ts

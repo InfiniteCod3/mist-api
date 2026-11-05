@@ -1,12 +1,14 @@
 # mist-api
 
-mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in five ways:
+mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plugins. It adds to Evi's plugin API in six ways:
 
 - Native calls are typed from the native module itself. `await mist.native.lookup(place)` gets its argument and result types from `native.ts`, so a renamed method or a changed argument fails the typecheck.
 - The native side can send events to the page. Evi's native side can't push, so `mist.events.subscribe` long-polls a channel made with `nativeEvents`, in order, and loads the page's state again after a restart.
-- The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`.
-- Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, and a bus between plugins.
-- Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port.
+- The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`. `mist.signal` aborts when the run stops, and `mist.toast` does nothing after it, so timers and promise callbacks need no `mist.running` check.
+- Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, a bus between plugins, and `mist.storage`, a key-value store in IndexedDB for each plugin and, if you want, each account.
+- `mist.define` checks the plugin's patches. A `$self` name in a patch that the definition has no function for is a warning in the log and in `mist status`, not a `TypeError` inside Discord's code.
+- Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port. It also prints Flux actions as they are dispatched, reads Flux stores, and shows the layout of an element and the CSS rules that set it.
+- Plugins can be unit tested without Discord. `@aurologic/mist-api/testing` has a fake plugin context, a fake Flux store, and a fake `@evi/api` module for any test runner's module mock.
 
 It is a general library for anyone who writes Evi plugins. Evi's build bundles everything a plugin imports except `@evi/api`, React, and `electron`, so each plugin carries its own copy of mist-api. State that plugins share, such as the debug registry and the bus, lives on `globalThis` under versioned `Symbol.for` keys, so copies of different versions work together.
 
@@ -82,6 +84,7 @@ A git dependency such as `github:InfiniteCod3/mist-api` doesn't work, because `d
 4. For a native side, write `native.ts` with `defineNative`. Pass `typeof native` to `createMist`, imported with `import type`.
 5. Run `bun run dev` in your Evi checkout and turn the plugin on.
 6. Start Discord with a debugging port with `npx -p @aurologic/mist-api mist restart`. Then read the plugin with `mist status`, `mist logs <id>`, and `mist calls <id>` the same way.
+7. For bug reports from users, who can't run the CLI, offer `mist.copyReport()` in a settings panel button or `mist.reportCommand()` as a slash command. [mist.report](docs/core.md#mistreport) lists what the report contains.
 
 The example below shows each file. [Migrate a plugin to mist-api](docs/migration.md) covers a plugin that already exists.
 
@@ -164,6 +167,31 @@ export default mist.define({
 
 Run `bun run dev` in your Evi checkout and turn the plugin on. Evi's [plugin guide](https://github.com/BleedDev/evi/blob/main/docs/plugins.md) covers the manifest and the build.
 
+## Use Discord's app
+
+`@aurologic/mist-api/discord` covers the parts of Discord's app that plugins often rebuild: saved accounts and account switches, Discord's own API client with typed errors and message paging, Discord's router, avatar URLs, the clipboard, times and dates in Discord's language, and the message box.
+
+```ts
+import { accounts, chat, discord, format } from "@aurologic/mist-api/discord";
+
+export async function showRecent(channelId: string) {
+	const lines: string[] = [];
+	for await (const message of discord.messages(channelId, { limit: 200 })) {
+		lines.push(`[${format.date(message.timestamp, { timeStyle: "short" })}] ${message.author.username}: ${message.content}`);
+	}
+	chat.localMessage(`Read ${lines.length} messages.`, channelId);
+	return lines;
+}
+
+export default mist.define({
+	start(ctx) {
+		ctx.onDispose(accounts.on("connected", ({ id }) => mist.log.info(`connected as ${id}`)));
+	},
+});
+```
+
+Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. [Discord](docs/discord.md) lists what each part needs.
+
 ## Debug a plugin over CDP
 
 The `mist` CLI talks to Discord over its debugging port. It runs on Node 22 or later. From npm, run it with `npx -p @aurologic/mist-api mist`, which works whether or not it's installed. Name the package with `-p`: a bare `npx mist` outside the install folder downloads an unrelated npm package called `mist`. From a checkout, run the built file, or run the source on Node 22.18 or later or on Bun:
@@ -228,6 +256,25 @@ The examples below write `mist` for any of these.
 	mist patches weather-demo
 	```
 
+9. Watch the Flux actions that Discord dispatches, masked like recorded values, until Ctrl+C:
+
+	```sh
+	mist flux PRESENCE_UPDATES -f
+	```
+
+10. List a Flux store's methods, and call one that reads:
+
+	```sh
+	mist store SelectedChannelStore
+	mist store SelectedChannelStore getChannelId
+	```
+
+11. See why an element is laid out the way it is, from its computed layout, its ancestors', and the CSS rules that set them:
+
+	```sh
+	mist inspect '[class^="sidebar_"]' --depth 2
+	```
+
 The CLI shows the page's logs, calls, and values whole for every plugin. `mist call` works, and `mist native-logs` shows values whole, only when Discord's main process was started with a debugging port and the plugin's native side is made with `defineNative`. Other plugins on the page see only each value's type and size, log text and error messages included. Fields named like secrets (`token`, `password`, `cookie`, `session`, and others) are masked even in the whole view. [Security model](docs/security.md) explains why.
 
 ## Documentation
@@ -237,7 +284,9 @@ The CLI shows the page's logs, calls, and values whole for every plugin. `mist c
 - [Events](docs/events.md) sends events from the native side to the page with `nativeEvents` and `mist.events.subscribe`.
 - [Stores](docs/stores.md) covers Discord's Flux stores and `useStore` (`@aurologic/mist-api/stores`).
 - [Util](docs/util.md) covers `isRecord`, `sleep`, `fetchWithTimeout`, `fetchJson`, `HttpError`, and the `DiscordNative` types (`@aurologic/mist-api/util`).
+- [Discord](docs/discord.md) covers accounts, Discord's API, navigation, avatars, the clipboard, formatting in Discord's language, and the message box (`@aurologic/mist-api/discord`).
 - [Bus](docs/bus.md) covers channels and slots between plugins (`@aurologic/mist-api/bus`).
+- [Testing](docs/testing.md) covers the test doubles for a plugin's unit tests (`@aurologic/mist-api/testing`).
 - [CLI](docs/cli.md) lists every `mist` command and flag.
 - [Security model](docs/security.md) explains the debug gate.
 - [Migrate a plugin to mist-api](docs/migration.md) shows each change with before and after code.

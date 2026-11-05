@@ -4,8 +4,9 @@ import { join } from "node:path";
 
 import { createMist } from "../src/index";
 import type { MistNative, NativeEventsOptions } from "../src/native";
+import { fakeContext } from "../src/testing";
 import { copyOfSources } from "./copies";
-import { fakeContext } from "./helpers";
+
 
 type Note = { type: "saved"; id: string; } | { type: "toast"; text: string; };
 
@@ -44,7 +45,7 @@ async function until(done: () => boolean, ms = 2000) {
 /** A running plugin whose page subscribes to `native`'s channel */
 function page(id: string, bridge: (method: string, ...args: unknown[]) => Promise<unknown>) {
     const mist = createMist<{}, MistNative<{ ping(): string; }, Note>>(id);
-    const run = fakeContext(bridge, {}, id);
+    const run = fakeContext({ native: bridge, id });
     mist.define({}).start!(run.ctx);
     return { mist, run };
 }
@@ -189,7 +190,7 @@ test("a failed onConnect is retried before any event is delivered, and a throwin
     events.push({ type: "saved", id: "late" });
     await until(() => got.length === 2);
     expect(got).toEqual(["early", "late"]);
-    const warned = run.printed.filter(p => p.level === "warn").map(p => p.args[0]);
+    const warned = run.logs.filter(p => p.level === "warn").map(p => p.args[0]);
     expect(warned).toEqual(["Couldn't get events from the native side; trying again", "An event listener threw"]);
 });
 

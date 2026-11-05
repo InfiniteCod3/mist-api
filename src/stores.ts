@@ -1,6 +1,8 @@
 /** `@aurologic/mist-api/stores`: Discord's Flux stores, typed only as far as plugins use them, and ways to follow their changes. */
 import { filters, findStore, React, waitFor } from "@evi/api";
 
+import { storeMissed } from "./start.ts";
+
 /** Anything that announces changes the way a Flux store does, such as a plugin's own emitter */
 export interface ChangeSource {
     addChangeListener(listener: () => void): void;
@@ -89,16 +91,23 @@ function lookUp<T>(name: string): T | undefined {
     }
 }
 
+/** A `stores` read: one that comes back empty during a plugin's start is a warning for that plugin */
+function read<T>(name: string): T | undefined {
+    const store = lookUp<T>(name);
+    if (!store) storeMissed(name);
+    return store;
+}
+
 /** Each store, looked up when read (undefined until Discord has it). Reading is cheap: Evi caches stores by name. */
 export const stores = {
-    get user() { return lookUp<UserStore>("UserStore"); },
-    get channel() { return lookUp<ChannelStore>("ChannelStore"); },
-    get guild() { return lookUp<GuildStore>("GuildStore"); },
-    get selectedChannel() { return lookUp<SelectedChannelStore>("SelectedChannelStore"); },
-    get multiAccount() { return lookUp<MultiAccountStore>("MultiAccountStore"); },
-    get presence() { return lookUp<PresenceStore>("PresenceStore"); },
-    get sessions() { return lookUp<SessionsStore>("SessionsStore"); },
-    get streamerMode() { return lookUp<StreamerModeStore>("StreamerModeStore"); },
+    get user() { return read<UserStore>("UserStore"); },
+    get channel() { return read<ChannelStore>("ChannelStore"); },
+    get guild() { return read<GuildStore>("GuildStore"); },
+    get selectedChannel() { return read<SelectedChannelStore>("SelectedChannelStore"); },
+    get multiAccount() { return read<MultiAccountStore>("MultiAccountStore"); },
+    get presence() { return read<PresenceStore>("PresenceStore"); },
+    get sessions() { return read<SessionsStore>("SessionsStore"); },
+    get streamerMode() { return read<StreamerModeStore>("StreamerModeStore"); },
 };
 
 /** The logged-in account's id */

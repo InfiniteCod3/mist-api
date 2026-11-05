@@ -39,6 +39,8 @@ export interface DebugSource {
     context(): PluginContext<any> | undefined;
     startedAt(): number | null;
     callNative(method: string, args: unknown[]): Promise<unknown>;
+    provides: Readonly<Record<string, number>>;
+    warnings(): string[];
 }
 
 export interface Debug {
@@ -141,9 +143,11 @@ export function createDebug(source: DebugSource): Debug {
         },
     });
 
+    const provides = Object.freeze({ ...source.provides });
     const handle: MistHandle = Object.freeze(Object.assign(new Sealed(capability), {
         id,
         mistVersion: MIST_VERSION,
+        provides,
         state: (): HandleState => ({
             id,
             mistVersion: MIST_VERSION,
@@ -153,6 +157,8 @@ export function createDebug(source: DebugSource): Debug {
             debug: open(),
             errors: recorder.errors(),
             quiet: recorder.quiet(),
+            provides: { ...provides },
+            warnings: source.warnings(),
         }),
         logs: (n?: number) => recorder.logs(n, false),
         calls: (n?: number) => recorder.calls(n, false),

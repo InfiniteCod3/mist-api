@@ -2,12 +2,13 @@ import { expect, test } from "bun:test";
 
 import { createDebug } from "../src/debug";
 import { createRecorder } from "../src/recorder";
-import { fakeContext, mistNative, type NativeImpl, noNative, plainNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { mistNative, type NativeImpl, noNative, plainNative } from "./helpers";
 
 /** One plugin's debug views over a run whose native side is `native` */
 async function setup(native: NativeImpl) {
     const recorder = createRecorder({ keepValues: true });
-    const run = fakeContext(native, { volume: 70, apiToken: "do-not-show" });
+    const run = fakeContext({ native, settings: { volume: 70, apiToken: "do-not-show" } });
     const callNative = (method: string, args: unknown[]) => recorder.track(method, args, async () => run.ctx.native.call(method, ...args));
     const debug = createDebug({
         id: "t-gate",
@@ -16,6 +17,8 @@ async function setup(native: NativeImpl) {
         context: () => run.ctx,
         startedAt: () => 0,
         callNative,
+        provides: {},
+        warnings: () => [],
     });
     await debug.probe(run.ctx);
     await callNative("echo", ["private text"]).catch(() => { });
@@ -78,7 +81,7 @@ test("the native side is asked once", async () => {
         return true;
     };
     const debug = await setup(native);
-    const run = fakeContext(native);
+    const run = fakeContext({ native });
     await debug.probe(run.ctx);
     await debug.capability.call("anything");
     expect(asked).toBe(1);

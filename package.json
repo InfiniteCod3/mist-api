@@ -43,6 +43,16 @@
             "import": "./dist/bus.js",
             "default": "./dist/bus.js"
         },
+        "./discord": {
+            "types": "./dist/discord.d.ts",
+            "import": "./dist/discord.js",
+            "default": "./dist/discord.js"
+        },
+        "./testing": {
+            "types": "./dist/testing.d.ts",
+            "import": "./dist/testing.js",
+            "default": "./dist/testing.js"
+        },
         "./ui": {
             "types": "./dist/ui.d.ts",
             "import": "./dist/ui.js",
@@ -92,6 +102,7 @@
         "@types/node": "^26.6.3",
         "@types/react": "19",
         "@types/react-test-renderer": "19",
+        "fake-indexeddb": "^6.2.7",
         "react": "19",
         "react-test-renderer": "19",
         "typescript": "^7.0.2",

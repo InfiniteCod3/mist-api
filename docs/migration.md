@@ -65,6 +65,8 @@ Then change each use of the variable:
 | `if (!context) return;` | `if (!mist.running) return;` |
 | `context?.x` used only to skip when stopped | `if (mist.running) mist.ctx.x` |
 | `context === ctx` | `mist.running && mist.ctx === ctx` |
+| `context?.toast(...)` | `mist.toast(...)` |
+| An `AbortController` aborted in `onDispose` | `const signal = mist.signal;` in `start` |
 | `context = ctx` in `start` | Delete it. |
 | `context = undefined` in `onDispose` | Delete it. |
 

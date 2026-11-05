@@ -131,7 +131,7 @@ start(ctx) {
 
 A name is the store's name as Discord gives it. `subscribe` listens at once to a store that already exists. It waits for a store that doesn't, through Evi's `waitFor`, starts listening when Discord makes it, and calls `listener` once then, because the store may have changed before it was listened to. Unsubscribing before then stops the wait.
 
-A store or other `ChangeSource` you pass is listened to as it is. An entry that is `undefined` is skipped and isn't listened to later, so `subscribe([stores.presence], redraw)` in `start` can silently listen to nothing. Subscribing the same listener twice gives two subscriptions, and each unsubscribe removes only its own.
+A store or other `ChangeSource` you pass is listened to as it is. An entry that is `undefined` is skipped and isn't listened to later, so `subscribe([stores.presence], redraw)` in `start` can silently listen to nothing. `mist.define` warns about each store that a `stores` getter reads as missing during the synchronous part of `start`, as [Stores read too early](core.md#stores-read-too-early) describes. Subscribing the same listener twice gives two subscriptions, and each unsubscribe removes only its own.
 
 ## useStore
 

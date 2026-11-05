@@ -1,13 +1,18 @@
 /** `@aurologic/mist-api`: the page side of a plugin. */
 import type { PluginContext, PluginDefinition, SettingsSchema } from "@evi/api";
 
+import { createNativeClient, type NativeClient } from "./client.ts";
 import { createDebug } from "./debug.ts";
-import { errorMessage, type EventsAnswer, HIDDEN, type HiddenMethod, type LogLevel } from "./protocol.ts";
+import { errorMessage, type EventsAnswer, HIDDEN, type LogLevel, type RequestEvent } from "./protocol.ts";
 import { createRecorder, type RecordingOptions } from "./recorder.ts";
 import { registry } from "./registry.ts";
+import { createRequests, type MistRequests, type RequestsOf } from "./replies.ts";
 import { type MistEvents, subscribe } from "./subscribe.ts";
 
 export { onDemand } from "./patches.ts";
+export { MistNativeError } from "./errors.ts";
+export type { CallOptions, NativeClient, NativeFunction } from "./client.ts";
+export type { MistRequests, RequestsOf } from "./replies.ts";
 export { MIST_VERSION } from "./protocol.ts";
 export type { CallOutcome, CallRecord, EventsAnswer, LogLevel, LogRecord, NativeLogs, ReducedNativeLogs, Shown } from "./protocol.ts";
 export type { MistEvents, SubscribeOptions } from "./subscribe.ts";
@@ -16,18 +21,6 @@ export type { HandleState, MistHandle, NativeKind, RegistryHistory } from "./reg
 export type { Reduced, Snapshot } from "./values.ts";
 
 type Method = (...args: any[]) => unknown;
-
-/**
- * The page's view of a native module: every method but start, stop and mist's hidden ones, each
- * returning a promise of what it returns (Electron's IPC structured-clones it on the way). A method
- * that returns a promise already keeps its own type, so a generic one keeps its type parameters,
- * which inferring its arguments and result would erase.
- */
-export type NativeClient<N> = {
-    [K in keyof N as K extends "start" | "stop" | HiddenMethod ? never : N[K] extends Method ? K : never]:
-        N[K] extends (...args: any[]) => Promise<unknown> ? N[K]
-        : N[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never;
-};
 
 /** The type of the events a native module's channel carries, or never when it has none */
 export type EventsOf<N> = N extends Record<typeof HIDDEN.events, (...args: any[]) => Promise<EventsAnswer<infer E>>> ? E : never;
@@ -55,8 +48,10 @@ export interface Mist<S extends SettingsSchema, N> {
     readonly ctx: PluginContext<S>;
     /** From start until Evi disposes the run, which is after the plugin's stop */
     readonly running: boolean;
-    /** Typed native calls, recorded for `mist calls` */
+    /** Typed native calls, recorded for `mist calls`. `mist.native.method.with({ signal })(...args)` makes a call that can be aborted. */
     readonly native: NativeClient<N>;
+    /** Answers to the native side's requests (nativeRequests), typed from the native module */
+    readonly requests: MistRequests<RequestsOf<N>>;
     /** ctx.logger while running, recorded for `mist logs` either way */
     readonly log: MistLog;
     /** Events from the native side's channel (nativeEvents), typed from the native module */
@@ -91,7 +86,7 @@ ${errorMessage(err)}`;
 
 export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, options: MistOptions<N> = {}): Mist<S, N> {
     // The event channel's long poll would push every other call out of the ring, so it's only counted
-    const recorder = createRecorder({ ...options, quiet: [...options.quiet ?? [], HIDDEN.events], keepValues: true });
+    const recorder = createRecorder({ ...options, quiet: [...options.quiet ?? [], HIDDEN.events, HIDDEN.requests], keepValues: true });
     const exposed = new Map<string, () => unknown>();
     let current: PluginContext<S> | undefined;
     let startedAt: number | null = null;
@@ -114,16 +109,17 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
         error: (...args) => write("error", args),
     };
 
-    function callNative(method: string, args: unknown[]): Promise<unknown> {
-        return recorder.track(method, args, async () => ctx().native.call(method, ...args));
-    }
-
-    const native = new Proxy({}, {
-        // `then` stays undefined so the client isn't mistaken for a promise
-        get: (_, method) => typeof method === "string" && method !== "then" ? (...args: unknown[]) => callNative(method, args) : undefined,
-    }) as NativeClient<N>;
+    const client = createNativeClient({ context: ctx, track: (method, args, run) => recorder.track(method, args, run) });
+    const native = client.native as NativeClient<N>;
+    const callNative = (method: string, args: unknown[]) => client.call(method, args);
 
     const reportEvents = reporter((line, err) => log.warn(line, err));
+    const requests = createRequests<RequestsOf<N>>({
+        context: ctx,
+        protocol: client.protocol,
+        poll: (context, boot, cursor) => recorder.track(HIDDEN.requests, [boot, cursor], () => context.native.call<EventsAnswer<RequestEvent>>(HIDDEN.requests, boot, cursor)),
+        report: reportEvents,
+    });
 
     const debug = createDebug({ id, recorder, exposed, context: () => current, startedAt: () => startedAt, callNative });
     const registered = registry();
@@ -133,6 +129,7 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
         get ctx() { return ctx(); },
         get running() { return !!current; },
         native,
+        requests,
         log,
 
         events: {

@@ -14,7 +14,8 @@
         "paths": {
             "@evi/api": ["./node_modules/.evi/src/api/index.ts"],
             "@evi/api/*": ["./node_modules/.evi/src/api/*"],
-            "@shared/*": ["./node_modules/.evi/src/shared/*"]
+            "@shared/*": ["./node_modules/.evi/src/shared/*"],
+            "electron": ["./node_modules/.evi/node_modules/electron/electron.d.ts"]
         }
     },
     "include": ["src", "node_modules/.evi/src/shared/globals.d.ts"]

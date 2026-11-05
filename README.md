@@ -7,7 +7,7 @@ mist-api is a TypeScript library for [Evi](https://github.com/BleedDev/evi) plug
 - The plugin's context is held for you. `mist.ctx` is the running context and `mist.running` says whether there is one, so a plugin needs no module-level `let context` and no `context!`. `mist.signal` aborts when the run stops, and `mist.toast` does nothing after it, so timers and promise callbacks need no `mist.running` check.
 - Common plugin code comes ready to use. That includes a Flux store hook, typed stores, `fetch` with a timeout, `sleep`, a bus between plugins, and `mist.storage`, a key-value store in IndexedDB for each plugin and, if you want, each account.
 - `mist.define` checks the plugin's patches. A `$self` name in a patch that the definition has no function for is a warning in the log and in `mist status`, not a `TypeError` inside Discord's code.
-- Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port. It also prints Flux actions as they are dispatched, reads Flux stores, and shows the layout of an element and the CSS rules that set it.
+- Plugins can be debugged over the Chrome DevTools Protocol (CDP). The `mist` CLI reads each plugin's logs, native calls, native logs, and exposed values, and calls native methods, while Discord runs with a debugging port. It also prints Flux actions as they are dispatched, reads Flux stores, and shows the layout of an element and the CSS rules that set it. It reads the page's errors by plugin, source-mapped for watch builds, follows hot reloads, shows where plugins spend time, diffs a patched module, and lists the React components above an element. `mist manifest fix` checks a manifest's translations and size without Discord.
 - Plugins can be unit tested without Discord. `@aurologic/mist-api/testing` has a fake plugin context, a fake Flux store, and a fake `@evi/api` module for any test runner's module mock.
 
 It is a general library for anyone who writes Evi plugins. Evi's build bundles everything a plugin imports except `@evi/api`, React, and `electron`, so each plugin carries its own copy of mist-api. State that plugins share, such as the debug registry and the bus, lives on `globalThis` under versioned `Symbol.for` keys, so copies of different versions work together.
@@ -273,6 +273,32 @@ The examples below write `mist` for any of these.
 
 	```sh
 	mist inspect '[class^="sidebar_"]' --depth 2
+	```
+
+12. Read the page's errors, each with the plugin it came from and, for a watch build, its frames in your source files:
+
+	```sh
+	mist errors weather-demo -f
+	```
+
+13. Watch each hot reload of a dev build: whether it started, and its patch health:
+
+	```sh
+	mist dev weather-demo
+	```
+
+14. Find slow plugins and patches that never call in, see what patches did to a module, and see which React components render an element:
+
+	```sh
+	mist perf
+	mist module 123456 --diff
+	mist react '[class^="sidebar_"]'
+	```
+
+15. Before an upload, check the manifest's translations and size, and fix them:
+
+	```sh
+	mist manifest fix plugins/weather-demo --write
 	```
 
 The CLI shows the page's logs, calls, and values whole for every plugin. `mist call` works, and `mist native-logs` shows values whole, only when Discord's main process was started with a debugging port and the plugin's native side is made with `defineNative`. Other plugins on the page see only each value's type and size, log text and error messages included. Fields named like secrets (`token`, `password`, `cookie`, `session`, and others) are masked even in the whole view. [Security model](docs/security.md) explains why.

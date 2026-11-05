@@ -1,6 +1,8 @@
 /** The Chrome DevTools Protocol side of the CLI. Each function takes a `send`, so tests/cdp.test.ts runs them over node:inspector. */
 
 export type Send = (method: string, params?: Record<string, unknown>) => Promise<any>;
+/** Calls `handler` with the params of each `method` event the page sends; returns the unsubscribe */
+export type Listen = (method: string, handler: (params: any) => void) => () => void;
 
 interface RemoteObject { type: string; value?: unknown; objectId?: string; description?: string; }
 interface Evaluated { result: RemoteObject; exceptionDetails?: { text?: string; exception?: RemoteObject; }; }
@@ -88,6 +90,7 @@ export function discordPages(targets: Target[]): Target[] {
 
 export interface Connection {
     send: Send;
+    on: Listen;
     close(): void;
 }
 
@@ -100,11 +103,15 @@ export async function open(url: string, timeoutMs = 20_000): Promise<Connection>
     });
 
     let next = 1;
+    const handlers = new Map<string, Set<(params: any) => void>>();
     const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout>; }>();
     ws.addEventListener("message", event => {
-        let message: { id?: number; result?: unknown; error?: { message: string; }; };
+        let message: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { message: string; }; };
         try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.id === undefined) return;
+        if (message.id === undefined) {
+            if (message.method) for (const handler of handlers.get(message.method) ?? []) handler(message.params);
+            return;
+        }
         const waiter = pending.get(message.id);
         if (!waiter) return;
         pending.delete(message.id);
@@ -127,6 +134,12 @@ export async function open(url: string, timeoutMs = 20_000): Promise<Connection>
             pending.set(id, { resolve, reject, timer });
             ws.send(JSON.stringify({ id, method, params }));
         }),
+        on: (method, handler) => {
+            let set = handlers.get(method);
+            if (!set) handlers.set(method, set = new Set());
+            set.add(handler);
+            return () => void set.delete(handler);
+        },
         close: () => ws.close(),
     };
 }

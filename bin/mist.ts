@@ -9,9 +9,16 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { callOn, capability, CdpError, concerns, connect, type Connection, evaluate, releaseGroup } from "./cdp.ts";
+import { devLines, type PatchHealth, watchDev } from "./dev.ts";
+import { errorLines, type ErrorRecord, watchErrors } from "./errors.ts";
 import { type FluxBatch, watchFlux } from "./flux.ts";
 import { inspect, inspectLines } from "./inspect.ts";
+import { checkLeakTarget, findLeaks, leakLines } from "./leaks.ts";
+import { fixLines, fixManifestDir } from "./manifest.ts";
+import { moduleLines, readModule } from "./module.ts";
 import { DISPLAY, RECORDED } from "./page.ts";
+import { perfLines, readPerf } from "./perf.ts";
+import { reactLines, readReact } from "./react.ts";
 import { callStore, listStore, type StoreMethods } from "./store.ts";
 
 const USAGE = `mist <command> [options]
@@ -27,20 +34,31 @@ const USAGE = `mist <command> [options]
   flux [types...] [-f]        prints Flux actions as Discord dispatches them, all types without any
   store <name> [method]       lists a Flux store's methods, or calls a reading one with args
   inspect <selector>          an element's layout and its ancestors', with the CSS rules that set it
+  errors [id] [-f]            console errors and uncaught exceptions, by plugin, source-mapped
+  perf                        where plugins spend time, and applied patches whose $self calls never ran
+  dev <id>                    each hot reload of a plugin: reloaded, start error, patch health
+  module <id|text> [--diff]   a webpack module's patched source, or its diff against the original
+  react <selector>            the React components above an element, their props, and which are hooked
+  manifest fix [dir]          missing translations, and a changelog over Evi's 16 KB; --write fixes
+  leaks <id> --yes            turns a dev plugin off and on, comparing what stays behind
   restart                     restarts Discord with --remote-debugging-port
 
   --port <n>   debugging port (default 9222)
   -n <count>   how many records (default 50); flux: how many actions
   --json       prints raw JSON
-  --full       flux, store: values cut at mist's recorded-value bounds, not the shorter display ones
-  --depth <n>  inspect: how many ancestors (default 4)
-  --all        inspect: every match, not only the first
-  --dry-run    restart: prints what it would run`;
+  --full       flux, store, errors, react: values cut at mist's recorded-value bounds, not the shorter display ones
+  --depth <n>  inspect: how many ancestors (default 4); react: how many components (default 10)
+  --all        inspect: every match, not only the first; perf: every site, not the top 5
+  --dry-run    restart: prints what it would run
+  --diff       module: the patches' changes instead of the whole source
+  --write      manifest fix: writes the fixes to manifest.json
+  --cycles <n> leaks: how many off and on cycles (default 3)
+  --yes        leaks: turns the plugin off and on; without it, leaks only checks it may`;
 
-interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; full: boolean; depth: number; all: boolean; }
+interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; full: boolean; depth: number | null; all: boolean; diff: boolean; write: boolean; cycles: number; yes: boolean; }
 
 function parse(argv: string[]): { positional: string[]; options: Options; } {
-    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false, full: false, depth: 4, all: false };
+    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false, full: false, depth: null, all: false, diff: false, write: false, cycles: 3, yes: false };
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -57,11 +75,16 @@ function parse(argv: string[]): { positional: string[]; options: Options; } {
         else if (arg === "--full") options.full = true;
         else if (arg === "--depth") options.depth = Number(value());
         else if (arg === "--all") options.all = true;
+        else if (arg === "--diff") options.diff = true;
+        else if (arg === "--write") options.write = true;
+        else if (arg === "--yes") options.yes = true;
+        else if (arg === "--cycles") options.cycles = Number(value());
         else positional.push(arg);
     }
     if (!Number.isInteger(options.port) || options.port < 1) throw new CdpError("--port must be a port number");
     if (!Number.isInteger(options.count) || options.count < 1) throw new CdpError("-n must be a positive number");
-    if (!Number.isInteger(options.depth) || options.depth < 0) throw new CdpError("--depth must be 0 or more");
+    if (options.depth !== null && (!Number.isInteger(options.depth) || options.depth < 0)) throw new CdpError("--depth must be 0 or more");
+    if (!Number.isInteger(options.cycles) || options.cycles < 1 || options.cycles > 50) throw new CdpError("--cycles must be from 1 to 50");
     return { positional, options };
 }
 
@@ -178,23 +201,67 @@ function storeLines({ store, methods, stateKeys }: StoreMethods): string[] {
     ];
 }
 
-async function flux(c: Connection, types: string[], options: Options) {
+/** Runs a watch until Ctrl+C; a second Ctrl+C exits at once */
+async function untilInterrupted(run: (stopped: () => boolean) => Promise<void>) {
     let interrupted = false;
     const interrupt = () => {
         if (interrupted) process.exit(130);
         interrupted = true;
     };
     process.on("SIGINT", interrupt);
-    console.error(`Watching ${types.length ? types.join(", ") : "every action"}${options.follow ? " until Ctrl+C" : `, up to ${options.count}`}`);
     try {
-        await watchFlux(c.send, { types, count: options.follow ? null : options.count, limits: options.full ? RECORDED : DISPLAY, stopped: () => interrupted }, batch => {
-            if (options.json) for (const r of batch.records) console.log(JSON.stringify(r));
-            else for (const line of fluxLines(batch)) console.log(line);
-            if (!batch.alive) console.error("The page ended the watch: it reloaded, or the CLI didn't read it for 15 seconds");
-        });
+        await run(() => interrupted);
     } finally {
         process.off("SIGINT", interrupt);
     }
+}
+
+async function errors(c: Connection, plugin: string | undefined, options: Options) {
+    const print = (r: ErrorRecord) => console.log(options.json ? JSON.stringify(r) : errorLines(r, time).join("\n"));
+    let backlog: ErrorRecord[] | null = [];
+    await untilInterrupted(stopped => watchErrors(c.send, c.on, {
+        follow: options.follow,
+        stopped,
+        limits: options.full ? RECORDED : DISPLAY,
+        onReplayed: () => {
+            // The page replays its console first, then exceptions and log entries
+            const kept = backlog!.sort((a, b) => a.at - b.at);
+            backlog = null;
+            if (!kept.length && !options.json) console.error(`No errors${plugin ? ` from ${plugin}` : ""} in what the page kept${options.follow ? ". Watching until Ctrl+C" : ""}`);
+            if (kept.length > options.count) console.error(`… ${kept.length - options.count} older errors (-n shows more)`);
+            kept.slice(-options.count).forEach(print);
+        },
+    }, r => {
+        if (plugin && !r.plugins.includes(plugin)) return;
+        if (backlog) backlog.push(r);
+        else print(r);
+    }));
+}
+
+async function dev(c: Connection, id: string, options: Options) {
+    const patches = async (): Promise<PatchHealth> => {
+        const { patches } = await evaluate<{ patches: { index: number; health: string; find: string; errors: string[]; }[]; }>(c.send, PATCHES(id));
+        const health: Record<string, number> = {};
+        for (const p of patches) health[p.health] = (health[p.health] ?? 0) + 1;
+        return { health, problems: patches.filter(p => p.health !== "applied" && p.health !== "waiting") };
+    };
+    await untilInterrupted(stopped => watchDev(c.send, id, {
+        stopped,
+        patches,
+        onStart: ({ source, state }) => {
+            const now = state.error ? `start error: ${state.error}` : state.running ? "running" : "not running";
+            console.error(`Watching ${id} ${state.version} (${now}) for hot reloads until Ctrl+C${source === "dev" ? "" : `. It's a ${source} install: Evi hot-reloads dev builds, the ones in userplugins/ that its watch build writes`}`);
+        },
+    }, outcome => console.log(options.json ? JSON.stringify(outcome) : devLines(outcome, time).join("\n"))));
+}
+
+async function flux(c: Connection, types: string[], options: Options) {
+    console.error(`Watching ${types.length ? types.join(", ") : "every action"}${options.follow ? " until Ctrl+C" : `, up to ${options.count}`}`);
+    await untilInterrupted(stopped => watchFlux(c.send, { types, count: options.follow ? null : options.count, limits: options.full ? RECORDED : DISPLAY, stopped }, batch => {
+        if (options.json) for (const r of batch.records) console.log(JSON.stringify(r));
+        else for (const line of fluxLines(batch)) console.log(line);
+        if (!batch.alive) console.error("The page ended the watch: it reloaded, or the CLI didn't read it for 15 seconds");
+    }));
 }
 
 function restart(port: number, dryRun: boolean) {
@@ -231,6 +298,10 @@ async function main() {
         return;
     }
     if (command === "restart") return restart(options.port, options.dryRun);
+    if (command === "manifest") {
+        if (rest[0] !== "fix") throw new CdpError("mist manifest has one subcommand: mist manifest fix [dir]");
+        return print(fixManifestDir(rest[1] ?? ".", options.write), options.json, fixLines);
+    }
 
     const needId = () => {
         if (!rest[0]) throw new CdpError(`mist ${command} needs a plugin id (mist status lists them)`);
@@ -288,6 +359,31 @@ async function main() {
             }
             case "flux":
                 return await flux(c, rest, options);
+            case "errors":
+                return await errors(c, rest[0], options);
+            case "dev":
+                return await dev(c, needId(), options);
+            case "module": {
+                const query = rest.join(" ");
+                if (!query) throw new CdpError("mist module needs a module id, or text from its source");
+                return print(await readModule(c.send, c.on, query), options.json, r => moduleLines(r, options.diff));
+            }
+            case "react": {
+                const selector = rest.join(" ");
+                if (!selector) throw new CdpError("mist react needs a CSS selector");
+                return print(await readReact(c.send, selector, options.depth ?? 10, options.full ? RECORDED : { ...DISPLAY, depth: 2 }), options.json, r => reactLines(r, selector));
+            }
+            case "leaks": {
+                const id = needId();
+                if (!options.yes) {
+                    await checkLeakTarget(c.send, id);
+                    throw new CdpError(`mist leaks turns ${id} off and on ${options.cycles} times, which changes its switch in Evi's settings and runs its stop and start. It leaves it on. Add --yes to run it.`);
+                }
+                console.error(`Turning ${id} off and on ${options.cycles} times`);
+                return print(await findLeaks(c.send, id, { cycles: options.cycles }), options.json, leakLines);
+            }
+            case "perf":
+                return print(await readPerf(c.send), options.json, r => perfLines(r, options.all ? Infinity : 5));
             case "store": {
                 const [store, method, ...args] = rest;
                 if (!store) throw new CdpError("mist store needs a store name, as in UserStore");
@@ -297,7 +393,7 @@ async function main() {
             case "inspect": {
                 const selector = rest.join(" ");
                 if (!selector) throw new CdpError("mist inspect needs a CSS selector");
-                return print(await inspect(c.send, selector, options.depth, options.all), options.json, r => inspectLines(r, selector));
+                return print(await inspect(c.send, selector, options.depth ?? 4, options.all), options.json, r => inspectLines(r, selector));
             }
             default:
                 throw new CdpError(`Unknown command ${command}\n\n${USAGE}`);

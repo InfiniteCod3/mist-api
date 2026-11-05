@@ -24,7 +24,7 @@ Node strips TypeScript types only for files outside `node_modules`, so the sourc
 
 ## Connect
 
-Every command except `restart` connects the same way:
+Every command except `restart` and `manifest fix` connects the same way:
 
 1. It reads `http://127.0.0.1:<port>/json/list` and gives up after 5 seconds.
 2. It keeps the targets that are pages on `discord.com` or a subdomain, with `/app` and `/channels` pages first.
@@ -49,6 +49,13 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | `flux [types...] [-f]` | Prints Flux actions as Discord dispatches them: the named types, or every action. |
 | `store <Store> [method] [args]` | Lists a Flux store's methods, or calls one that reads and prints the result. |
 | `inspect <selector>` | Prints an element's layout and its ancestors', with the CSS rules that set it. |
+| `errors [id] [-f]` | Prints console errors, uncaught exceptions, and the page's error log entries, each with the plugin it came from. |
+| `perf` | Prints where each plugin spends time, and the applied patches whose `$self` functions never ran. |
+| `dev <id>` | Prints each hot reload of a plugin: whether it started, its start error, and its patch health. |
+| `module <id|text> [--diff]` | Prints a webpack module's source as Evi's patches left it, or its diff against Discord's original. |
+| `react <selector>` | Prints the React components that render an element, with their props, and marks the ones Evi hooked. |
+| `manifest fix [dir]` | Checks a plugin's `manifest.json` for missing translations and Evi's 16 KB limit. With `--write`, fixes it. |
+| `leaks <id> --yes` | Turns a dev build off and on, and prints the counts that grew with every cycle. |
 | `restart` | Restarts Discord with `--remote-debugging-port`. |
 
 ## Options
@@ -56,12 +63,16 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--port <n>` | `9222` | The debugging port. `restart` uses it for the flag it passes. |
-| `-n <count>` | `50` | How many records `logs`, `calls`, and `native-logs` print, and how many actions `flux` prints before it stops. |
+| `-n <count>` | `50` | How many records `logs`, `calls`, `native-logs`, and `errors` print, and how many actions `flux` prints before it stops. |
 | `--json` | off | Prints raw JSON instead of lines. `values`, `call`, `eval`, and a `store` call always print JSON. `flux` prints one JSON object per line. |
-| `-f`, `--follow` | off | `logs` keeps printing new lines. `flux` keeps printing actions until Ctrl+C. |
-| `--full` | off | `flux` and `store` cut values at the bounds of recorded values instead of the shorter display bounds. |
-| `--depth <n>` | `4` | How many ancestors `inspect` prints. |
-| `--all` | off | `inspect` prints every match, not only the first. |
+| `-f`, `--follow` | off | `logs` keeps printing new lines. `flux` keeps printing actions, and `errors` new errors, until Ctrl+C. |
+| `--full` | off | `flux`, `store`, `errors`, and `react` cut values at the bounds of recorded values instead of the shorter display bounds. |
+| `--depth <n>` | `4`, `10` | How many ancestors `inspect` prints (4), and how many components `react` prints (10). |
+| `--all` | off | `inspect` prints every match, not only the first. `perf` prints every site of each plugin, not the 5 slowest. |
+| `--diff` | off | `module` prints the patches' changes instead of the whole source. |
+| `--write` | off | `manifest fix` writes its fixes to `manifest.json`. |
+| `--cycles <n>` | `3` | How many times `leaks` turns the plugin off and on, from 1 to 50. |
+| `--yes` | off | `leaks` runs. Without it, `leaks` only checks that it may. |
 | `--dry-run` | off | `restart` prints what it would run. |
 
 ## What the CLI sees
@@ -248,6 +259,136 @@ element  span.item  96x18 at 8,8
 ```
 
 Rules are listed in stylesheet order, so of two rules with the same specificity, the later one wins. A rule inside `@media` is listed only when its media query matches, and is prefixed with the query. A rule inside `@supports`, `@layer`, or `@container` is prefixed with its condition, which `inspect` doesn't check. For a selector list, only the selectors in it that match are printed, with how many the list has. Nested CSS rules aren't listed. A stylesheet from another origin can't be read, and `inspect` says how many it skipped.
+
+## errors
+
+```sh
+mist errors
+mist errors weather-demo -f
+```
+
+Prints the page's errors, oldest first, as `<time> <source> [<plugin>] <message>` with up to four stack frames under each. There are three sources:
+
+| Source | What it is |
+| --- | --- |
+| `console` | A `console.error` or `console.assert` call, including each error that Evi catches and logs instead of throwing. |
+| `exception` | An uncaught exception or an unhandled promise rejection. |
+| `log` | An error entry of the page's own log, such as a failed network request or a blocked request. |
+
+When it connects, the page replays the errors it kept, so `errors` shows errors from before it ran. It prints the newest `-n` of them. With `-f`, it then prints each new error until you press Ctrl+C.
+
+With an id, `errors` prints only the errors that it attributes to that plugin. It attributes an error in this order:
+
+1. A line from Evi's logger: the plugin whose name the logger has, as with `mist.log.error`. For Evi's own loggers, the plugin that Evi's message names: `after hook of <id> on …`, `Failed to start <name>`, or `Module <n> threw. It was patched by: <ids>`. Such a line starts with the logger's name, as in `[Hooks]`.
+2. A stack frame in a plugin's code, which Evi evaluates as `evi://plugins/<id>.js`.
+3. A stack frame in a module that Evi patched, `evi://modules/<n>.js`: every plugin with a patch on that module. To find them, `errors` reads `Evi.diagnosePatches()` once.
+
+Evi's watch build, `bun scripts/build.ts --watch`, adds an inline source map to each plugin. For such a plugin, `errors` prints each of its frames at the place in your source file, as in `at boom (src/index.ts:3:11)`. Other builds have no map, and their frames show as `evi://plugins/<id>.js:<line>:<column>`. To read the maps, `errors` turns on CDP's debugger with every pause skipped.
+
+Object arguments are copied with the masking of recorded values and cut to the display bounds, as a `flux` payload is. An error's message and stack are text, so they are never masked.
+
+## perf
+
+```sh
+mist perf
+mist perf --all
+```
+
+Prints `Evi.perf.snapshot()`: for each plugin that ran code, the time it took since Discord started and in the last 10 seconds, and its 5 slowest sites. A site is a hook, a Flux handler, a `$self` function that patched code called, a timer, or `start()`. With `--all`, each site is printed. The first line is `Evi.stats`, the time that Evi added to the loading of Discord's modules.
+
+Then `perf` lists each applied patch whose string replacements name `$self` functions none of which has run. Such a patch changed its module, but Discord hasn't run the changed code. Often the code is on a screen that isn't open yet. If it stays on the list once you use the feature, the replacement is in code that never runs. A function replacement can't be read, so `perf` only counts those.
+
+`perf` reads `Evi.diagnosePatches()`, which compares each patch with every module and can block Discord for half a second. It never starts a recording, which would restart one that Evi's Performance tab is making.
+
+## dev
+
+```sh
+mist dev weather-demo
+```
+
+Watches the plugin through `Evi.plugins.subscribe` until Ctrl+C. Each time Evi hot-reloads it, `dev` waits until the plugin is quiet for a second, because an async `start` ends after the reload, and then prints one line with the new version and how the reload ended: `running`, `start error: <error>`, or `not running`. Under the line, it prints the plugin's patch health. When a changed patch can't apply until Discord reloads, it prints `needs a Discord reload (Ctrl+R)` and the reason:
+
+```text
+14:02:11.482 reloaded 1.2.1, running
+  patches: 2 applied
+14:03:40.007 changed, start error: SyntaxError: Unexpected token '}'
+```
+
+A `changed` line is a change without a new manifest, such as new code that doesn't evaluate. A change of Discord's language gives every plugin a new manifest, so it doesn't count as a reload. Evi hot-reloads dev builds, the plugins that its watch build writes, and `dev` says so when the plugin is installed another way.
+
+The listener lives in the page. The page removes it 15 seconds after the CLI last read it, as for `flux`.
+
+## module
+
+```sh
+mist module 123456
+mist module 123456 --diff
+mist module '"premium-feature-tier"'
+```
+
+Prints a webpack module's source as it ran. Give the module's id, or text that only one module's source contains. When several modules contain the text, `module` lists their ids.
+
+When Evi patched the module, it compiled a copy with the source URL `evi://modules/<id>.js`, and `module` reads that copy through CDP's debugger. Otherwise it prints Discord's original, and says whether the module is loaded yet. The first line names the patches whose records list the module.
+
+With `--diff`, `module` prints each change against the original, with 40 characters around it:
+
+```text
+@@ at 256791  weather-demo
+  …er:e,status:a,isMobile:s,subText:
+- (
++ Evi.$("weather-demo")?.subText?.((
+  0,v.jsx)(E7,{hovered:t,activities:i…
+```
+
+Each change names the plugins it is likely from: the plugins whose `$self` the added code calls, and the patches whose `match` matches where the change is. When neither says, it names every patch on the module, after `maybe`. Changes closer than 32 characters are shown as one. The diff gives up on a copy that differs in more than 4000 tokens.
+
+## react
+
+```sh
+mist react '[class^="nameTag_"]'
+mist react 'nav ul' --depth 4
+```
+
+Finds the first element that matches the CSS selector and prints the element, then each React component above it, nearest first, up to `--depth` components (10 by default). Each line is a component's name and its kind (`class`, `memo`, `forwardRef`, or `context`; a function component shows no kind), with its props on the next line. Discord's code is minified, so many names are one or two letters.
+
+Props are copied with the masking of recorded values, two levels deep, and `--full` uses the larger bounds. `children` shows as a count.
+
+`hooked by Evi` marks a component whose function Evi wrapped for a plugin's hook. Evi keeps no record of whose hook it is, so `react` names the plugins with a measured hook site named after the component, after `maybe`, and names none for a one- or two-letter name.
+
+## manifest fix
+
+```sh
+mist manifest fix
+mist manifest fix plugins/weather-demo --write
+```
+
+Reads `manifest.json` in the folder, or in the current folder, and checks it against two rules of Evi's store. It doesn't connect to Discord.
+
+- Translations. Every language Evi ships besides English (`de`, `es`, `fr`, `ja`, `pl`, `pt-BR`, `ru`, `tr`) needs `name`, `description` when the English one isn't empty, and notes for the current version in `locales.<language>`, as Evi's upload check asks. `manifest fix` lists each one that is missing. With `--write`, it adds each as a copy of the English text. Translate them before you upload. The check of the code's `defineStrings` tables isn't part of this command: `bun run preview-plugin` in Evi runs it.
+- Size. Evi's store refuses a built `manifest.json` over 16 KB (16384 bytes). `manifest fix` measures the manifest as Evi's build writes it, with `main` and, when there is a `native.ts`, `native` added. When it is over, `manifest fix` drops the other languages' notes for the oldest versions, oldest first, until it fits. English notes stay, and a language without notes for a version shows the English ones. The current version's notes are never dropped. If the manifest is still over, `manifest fix` says by how many bytes.
+
+Without `--write`, it changes nothing and says what it would do. `--write` writes `manifest.json` with four-space indentation.
+
+## leaks
+
+```sh
+mist leaks weather-demo --yes
+mist leaks weather-demo --cycles 5 --yes
+```
+
+Turns the plugin off and on `--cycles` times, 3 by default, through `Evi.plugins.setEnabled`. It counts these after it starts, after each stop, and after each start, 1.5 seconds after each switch:
+
+| Count | What it counts |
+| --- | --- |
+| `nodes` | Elements in the document. |
+| `styles` | `<style>` and stylesheet `<link>` elements, and adopted stylesheets. |
+| `subscribers` | Flux handlers subscribed with `Dispatcher.subscribe`. |
+| `interceptors` | Flux interceptors. |
+| `listeners` | Event listeners on the page, from CDP's `Performance.getMetrics`. |
+
+It prints each count against the first, and `LEAK?` for each count that rose after every stop and after every start. Discord changes the page on its own, so one cycle's rise doesn't count, and a busy channel can raise `nodes` without a leak.
+
+`leaks` changes the plugin's switch in Evi's settings and runs its `stop` and `start`, so it runs only on a dev build that is running, and only with `--yes`. Without `--yes`, it checks the plugin and says what it would do. It leaves the plugin on, also when a cycle fails.
 
 ## restart
 

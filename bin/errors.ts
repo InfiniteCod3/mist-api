@@ -1,0 +1,260 @@
+/**
+ * mist errors: console errors, uncaught exceptions and the page's own error log entries, read over
+ * CDP, attributed to a plugin where the message or the stack says which, with plugin frames mapped
+ * through the inline source map of a watch build.
+ */
+import { callOn, evaluate, type Listen, type Send } from "./cdp.ts";
+import { type Limits, pageSnapshot } from "./page.ts";
+import { type Mapper, mapper, parseDataUrl, type Position } from "./sourcemap.ts";
+
+interface RemoteObject { type: string; subtype?: string; value?: unknown; unserializableValue?: string; objectId?: string; description?: string; }
+interface CallFrame { functionName: string; url: string; lineNumber: number; columnNumber: number; }
+interface StackTrace { callFrames: CallFrame[]; }
+
+/** A stack frame, 1-based as a stack prints it, with where it came from in the plugin's source when its map says */
+export interface Frame { fn: string; url: string; line: number; column: number; original: Position | null; }
+export type ErrorSource = "console" | "exception" | "log";
+export type Attribution = "logger" | "stack" | "patched module";
+export interface ErrorRecord {
+    at: number;
+    source: ErrorSource;
+    text: string;
+    /** Plugin ids the error belongs to; several when a module that many patched threw */
+    plugins: string[];
+    via: Attribution | null;
+    frames: Frame[];
+}
+
+/** One event as the page sent it, before its values are read */
+interface Raw { at: number; source: ErrorSource; args: RemoteObject[]; text: string; stack: StackTrace | undefined; }
+
+/** The console methods whose calls count as errors */
+const ERROR_TYPES = new Set(["error", "assert"]);
+
+export function rawEvent(method: string, params: any): Raw | null {
+    switch (method) {
+        case "Runtime.consoleAPICalled":
+            return ERROR_TYPES.has(params.type) ? { at: params.timestamp, source: "console", args: params.args ?? [], text: "", stack: params.stackTrace } : null;
+        case "Runtime.exceptionThrown": {
+            const d = params.exceptionDetails ?? {};
+            return { at: params.timestamp, source: "exception", args: d.exception ? [d.exception] : [], text: d.exception ? "" : d.text ?? "Uncaught", stack: d.stackTrace };
+        }
+        case "Log.entryAdded": {
+            const e = params.entry ?? {};
+            return e.level === "error" ? { at: e.timestamp, source: "log", args: [], text: `${e.source}: ${e.text}${e.url ? ` (${e.url})` : ""}`, stack: e.stackTrace } : null;
+        }
+    }
+    return null;
+}
+
+/** `    at fn (url:line:col)` and `    at url:line:col` lines of a V8 stack */
+export function parseStack(text: string): Omit<Frame, "original">[] {
+    const frames: Omit<Frame, "original">[] = [];
+    for (const line of text.split("\n")) {
+        const m = /^\s*at (?:(.*?) \()?((?:[a-z][\w+.-]*:\/\/|\/)[^\s()]*?):(\d+):(\d+)\)?\s*$/.exec(line);
+        if (m) frames.push({ fn: m[1] ?? "", url: m[2], line: Number(m[3]), column: Number(m[4]) });
+    }
+    return frames;
+}
+
+/** Evi's Logger prints `%c Evi %c <name> ` and two styles before its arguments */
+const EVI_PREFIX = /^%c Evi %c (.*?) ?$/;
+
+/**
+ * Who an Evi log line is about. Each pattern is one of Evi's messages for an error it caught and
+ * logged instead of throwing (src/renderer/patching/hooks.ts, plugins/manager.ts, webpack/runtime.ts).
+ */
+export function loggerPlugins(logger: string, message: string, byName: Map<string, string>): string[] {
+    const own = byName.get(logger);
+    if (own) return [own];
+    const id = (name: string) => byName.get(name) ?? name;
+    let m: RegExpExecArray | null;
+    if (logger === "Hooks" && (m = /^(?:before|after|instead) hook of (\S+) on /.exec(message))) return m[1] === "unknown" ? [] : [m[1]];
+    if (logger === "Plugins" && (m = /^Failed to (?:start|reload|evaluate) (.+)$/.exec(message) ?? /^(.+) threw while stopping$/.exec(message))) return [id(m[1])];
+    if (logger === "Webpack" && (m = /^Module \S+ threw\. It was patched by: (.+)$/.exec(message))) return m[1].split(", ");
+    return [];
+}
+
+const pluginOfUrl = (url: string) => /^evi:\/\/plugins\/(.+)\.js$/.exec(url)?.[1];
+const moduleOfUrl = (url: string) => /^evi:\/\/modules\/(.+)\.js$/.exec(url)?.[1];
+
+/** Evi evaluates a plugin as `new Function(…, "return function (module, exports, require) {" + code …)` */
+const EVI_WRAPPER = "return function (module, exports, require) {";
+
+/** Where the bundle starts in the script Evi made of it, so the map's positions line up */
+export function codeOffset(source: string): { line: number; column: number; } {
+    const at = source.indexOf(EVI_WRAPPER);
+    if (at < 0) return { line: 0, column: 0 };
+    const start = at + EVI_WRAPPER.length;
+    const before = source.slice(0, start);
+    const line = before.split("\n").length - 1;
+    return { line, column: start - (before.lastIndexOf("\n") + 1) };
+}
+
+/** The last inline map a script names; Evi's wrapper puts the bundle's own comment inside a function, where V8 still finds it */
+export function inlineMapUrl(source: string): string | null {
+    const all = [...source.matchAll(/\/\/[#@] sourceMappingURL=(data:\S+)/g)];
+    return all.length ? all[all.length - 1][1] : null;
+}
+
+interface Script { id: string; mapUrl: string; }
+
+export interface ErrorOptions {
+    /** Keep listening until `stopped` */
+    follow: boolean;
+    stopped?: () => boolean;
+    limits: Limits;
+    /** How long the page has to replay what it kept before a non-follow read ends */
+    settleMs?: number;
+    pollMs?: number;
+    /** Called once every error the page kept has gone to `onRecord`, before any new one */
+    onReplayed?: () => void;
+}
+
+/**
+ * Reads the errors the page kept (Runtime.enable and Log.enable replay them), then with `follow`
+ * the new ones, passing each to `onRecord` in order. Object arguments are copied through
+ * pageSnapshot, so fields named like secrets are masked. Turns its domains off again however it ends.
+ */
+export async function watchErrors(send: Send, listen: Listen, options: ErrorOptions, onRecord: (record: ErrorRecord) => void): Promise<void> {
+    const { follow, stopped = () => false, limits, settleMs = 300, pollMs = 250, onReplayed = () => { } } = options;
+    const scripts = new Map<string, Script>();
+    const queue: Raw[] = [];
+    const off = [
+        listen("Debugger.scriptParsed", p => { if (p.url) scripts.set(p.url, { id: p.scriptId, mapUrl: p.sourceMapURL ?? "" }); }),
+        ...["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"].map(method => listen(method, params => {
+            const raw = rawEvent(method, params);
+            if (raw) queue.push(raw);
+        })),
+    ];
+
+    const byName = new Map<string, string>();
+    const unknownLoggers = new Set<string>();
+    const refreshNames = async () => {
+        const list = await evaluate<[string, string][]>(send, `(globalThis.Evi?.plugins?.getSnapshot?.() ?? []).map(s => [s.manifest.id, s.manifest.name])`).catch(() => []);
+        for (const [id, name] of list) {
+            byName.set(name, id);
+            byName.set(id, id);
+        }
+    };
+
+    let patchers: Map<string, string[]> | null = null;
+    const patchersOf = async (moduleId: string) => {
+        patchers ??= new Map(await evaluate<[string, string[]][]>(send, `(() => {
+            const out = {};
+            for (const p of globalThis.Evi?.diagnosePatches?.() ?? []) for (const m of p.modules) (out[m] ??= new Set()).add(p.plugin);
+            return Object.entries(out).map(([m, s]) => [m, [...s]]);
+        })()`).catch(() => []));
+        return patchers.get(moduleId) ?? [];
+    };
+
+    const mappers = new Map<string, Promise<{ map: Mapper; offset: { line: number; column: number; }; } | null>>();
+    const mapperOf = (url: string) => {
+        const script = scripts.get(url);
+        if (!script) return Promise.resolve(null);
+        let found = mappers.get(script.id);
+        if (!found) mappers.set(script.id, found = (async () => {
+            const { scriptSource } = await send("Debugger.getScriptSource", { scriptId: script.id }).catch(() => ({ scriptSource: "" }));
+            const map = parseDataUrl(script.mapUrl) ?? parseDataUrl(inlineMapUrl(scriptSource) ?? "");
+            return map ? { map: mapper(map), offset: codeOffset(scriptSource) } : null;
+        })());
+        return found;
+    };
+    const mapFrame = async (frame: Omit<Frame, "original">): Promise<Frame> => {
+        if (!pluginOfUrl(frame.url)) return { ...frame, original: null };
+        const found = await mapperOf(frame.url);
+        if (!found) return { ...frame, original: null };
+        const line = frame.line - 1 - found.offset.line;
+        const column = frame.column - 1 - (line === 0 ? found.offset.column : 0);
+        const at = line >= 0 && column >= 0 ? found.map(line, column) : null;
+        return { ...frame, original: at && { ...at, line: at.line + 1, column: at.column + 1 } };
+    };
+
+    const show = async (arg: RemoteObject): Promise<string> => {
+        if (arg.type === "string") return String(arg.value);
+        if (arg.type === "undefined") return "undefined";
+        if (arg.unserializableValue) return arg.unserializableValue;
+        if (arg.subtype === "error" || !arg.objectId) return arg.description ?? JSON.stringify(arg.value) ?? String(arg.value);
+        const copy = await callOn(send, arg.objectId, `function (limits) { return (${pageSnapshot})(this, limits); }`, [limits]).catch(() => arg.description);
+        return typeof copy === "string" ? copy : JSON.stringify(copy);
+    };
+
+    const record = async (raw: Raw): Promise<ErrorRecord> => {
+        let args = raw.args;
+        let logger: string | null = null;
+        const format = args[0]?.type === "string" ? String(args[0].value) : "";
+        const prefix = EVI_PREFIX.exec(format);
+        if (prefix) {
+            logger = prefix[1];
+            args = args.slice(3);
+        } else if (format.includes("%c")) {
+            // Each %c takes a style argument and prints nothing
+            const styles = format.split("%c").length - 1;
+            args = [{ type: "string", value: format.replaceAll("%c", "").trim() }, ...args.slice(1 + styles)];
+        }
+        const parts = await Promise.all(args.map(show));
+        const text = [raw.text, ...parts].filter(Boolean).join(" ");
+
+        const stackText = args.filter(a => a.subtype === "error").map(a => a.description ?? "").join("\n");
+        const frames = parseStack(stackText);
+        if (!frames.length) for (const f of raw.stack?.callFrames ?? []) frames.push({ fn: f.functionName, url: f.url, line: f.lineNumber + 1, column: f.columnNumber + 1 });
+
+        let plugins: string[] = [];
+        let via: Attribution | null = null;
+        if (logger !== null) {
+            if (!byName.has(logger) && !unknownLoggers.has(logger)) {
+                unknownLoggers.add(logger);
+                await refreshNames();
+            }
+            plugins = loggerPlugins(logger, parts[0] ?? "", byName);
+            if (plugins.length) via = "logger";
+        }
+        if (!plugins.length) {
+            const fromPlugin = frames.map(f => pluginOfUrl(f.url)).find(Boolean);
+            if (fromPlugin) [plugins, via] = [[fromPlugin], "stack"];
+        }
+        if (!plugins.length) {
+            const module = frames.map(f => moduleOfUrl(f.url)).find(Boolean);
+            if (module) {
+                plugins = await patchersOf(module);
+                if (plugins.length) via = "patched module";
+            }
+        }
+        const prefixText = logger !== null && !byName.has(logger) ? `[${logger}] ` : "";
+        return { at: Math.floor(raw.at), source: raw.source, text: prefixText + text, plugins, via, frames: await Promise.all(frames.slice(0, 8).map(mapFrame)) };
+    };
+
+    const drain = async () => {
+        while (queue.length) onRecord(await record(queue.shift()!));
+    };
+
+    try {
+        await refreshNames();
+        await send("Debugger.enable").catch(() => { });
+        await send("Debugger.setSkipAllPauses", { skip: true }).catch(() => { });
+        await send("Runtime.enable");
+        await send("Log.enable").catch(() => { });
+        await new Promise(resolve => setTimeout(resolve, settleMs));
+        await drain();
+        onReplayed();
+        while (follow && !stopped()) {
+            await new Promise(resolve => setTimeout(resolve, pollMs));
+            await drain();
+        }
+    } finally {
+        for (const stop of off) stop();
+        for (const method of ["Log.disable", "Runtime.disable", "Debugger.disable"]) await send(method).catch(() => { });
+    }
+}
+
+const place = (f: Frame) => f.original ? `${f.original.source}:${f.original.line}:${f.original.column}` : `${f.url}:${f.line}:${f.column}`;
+
+export function errorLines(r: ErrorRecord, time: (at: number) => string, frames = 4): string[] {
+    const who = r.plugins.length ? ` [${r.plugins.join(", ")}]` : "";
+    const [first, ...rest] = r.text.split("\n").filter(line => !/^\s*at /.test(line));
+    return [
+        `${time(r.at)} ${r.source.padEnd(9)}${who} ${first ?? ""}`,
+        ...rest.map(line => `    ${line}`),
+        ...r.frames.slice(0, frames).map(f => `    at ${f.original?.name ?? f.fn ?? ""}${f.original?.name || f.fn ? " " : ""}(${place(f)})`),
+    ];
+}

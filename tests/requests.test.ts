@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { createMist } from "../src/index";
 import { copyOfSources } from "./copies";
-import { electronBridge, fakeContext, mistNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { electronBridge, mistNative } from "./helpers";
 
 const removes: (() => void)[] = [];
 afterAll(() => { for (const remove of removes) remove(); });
@@ -30,7 +31,7 @@ async function asking(timeoutMs = 2000) {
 
 function page<N>(id: string, module: object) {
     const mist = createMist<{}, N>(id);
-    const run = fakeContext(electronBridge(module), {}, id);
+    const run = fakeContext({ native: electronBridge(module), id });
     mist.define({}).start!(run.ctx);
     return { mist, run };
 }
@@ -121,12 +122,12 @@ test("a native side without requests support gets no polling from the page, whic
     const mist = createMist<{}, {}>("t-no-requests");
     const calls: string[] = [];
     const native = mistNative(false);
-    const run = fakeContext((method, ...args) => { calls.push(method); return native(method, ...args); }, {}, "t-no-requests");
+    const run = fakeContext({ native: (method, ...args) => { calls.push(method); return native(method, ...args); }, id: "t-no-requests" });
     mist.define({}).start!(run.ctx);
     // @ts-expect-error a native module without requests takes no handlers
     mist.requests.handle("anything", () => 1);
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(calls).not.toContain("__mist_requests");
-    expect(run.printed.filter(p => p.level === "warn").map(p => String(p.args[0]))).toEqual([expect.stringContaining("needs defineNative from @aurologic/mist-api 0.3")]);
+    expect(run.logs.filter(p => p.level === "warn").map(p => String(p.args[0]))).toEqual([expect.stringContaining("needs defineNative from @aurologic/mist-api 0.3")]);
     run.dispose();
 });

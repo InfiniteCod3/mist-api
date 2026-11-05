@@ -19,6 +19,8 @@ The shared state holds only data. That is a set of listeners and, for a slot, th
 
 The name and the version together are the protocol between plugins. When the shape of the payload changes, raise the version. Old and new then use different keys, so they never see each other's values. mist-api's own version plays no part.
 
+A user can update one plugin and not the other, so they end up on different versions and stop hearing each other. Declare the protocol in `createMist`'s `provides` and `needs` options, and mist-api tells the user which plugin to update, as [Plugins that depend on each other](core.md#plugins-that-depend-on-each-other) describes.
+
 A copy that finds the key holding state it can't read throws `mist bus: <kind> <name>@<version> was made by an incompatible copy`. A name that is empty, or a version that isn't an integer of 1 or more, throws `mist bus: bad name or version`.
 
 Both functions take an optional third argument, `root`, which defaults to `globalThis`. Tests pass their own object.

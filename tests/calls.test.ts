@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { createMist, MistNativeError } from "../src/index";
 import { HttpError } from "../src/util";
 import { copyOfRelease, copyOfSources } from "./copies";
-import { electronBridge, fakeContext, plainNative } from "./helpers";
+import { fakeContext } from "../src/testing";
+import { electronBridge, plainNative } from "./helpers";
 
 const removes: (() => void)[] = [];
 afterAll(() => { for (const remove of removes) remove(); });
@@ -24,7 +25,7 @@ async function freshNative() {
 function page<N>(id: string, module: object) {
     const sent: { method: string; args: unknown[]; }[] = [];
     const mist = createMist<{}, N>(id);
-    const run = fakeContext(electronBridge(module, sent), {}, id);
+    const run = fakeContext({ native: electronBridge(module, sent), id });
     mist.define({}).start!(run.ctx);
     return { mist, run, sent };
 }
@@ -88,7 +89,7 @@ test("a page from mist 0.2.1 calls this native side as before: no mark, plain va
     });
     module.start({ pluginId: "t-old-page" } as NativeContext);
     const mist = oldCreateMist<{}, typeof module>("t-old-page");
-    mist.define({}).start!(fakeContext(electronBridge(module), {}, "t-old-page").ctx);
+    mist.define({}).start!(fakeContext({ native: electronBridge(module), id: "t-old-page" }).ctx);
 
     expect(await mist.native.add(1, 2)).toBe(3);
     expect(seenArgs).toEqual([1, 2]);
@@ -114,7 +115,7 @@ test("this page calls a mist 0.2.1 native side and a plain one as before: no mar
 
     let plainArgs: unknown[] = [];
     const mist = createMist<{}, { add(...args: number[]): number; }>("t-plain");
-    mist.define({}).start!(fakeContext(plainNative({ add: (...args: number[]) => { plainArgs = args; return args.length; } }), {}, "t-plain").ctx);
+    mist.define({}).start!(fakeContext({ native: plainNative({ add: (...args: number[]) => { plainArgs = args; return args.length; } }), id: "t-plain" }).ctx);
     expect(await mist.native.add(4, 5, 6)).toBe(3);
     expect(plainArgs).toEqual([4, 5, 6]);
 });

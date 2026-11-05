@@ -1,7 +1,8 @@
 /**
  * Installs the packed tarball into a fresh project, the way a plugin author gets it, and checks
  * that the CLI runs with Node, that a file importing every subpath typechecks against the packed
- * types, and that a Bun bundle of a small plugin carries only what it imports. Run after the build.
+ * types, that the testing subpath runs under plain Node, and that a Bun bundle of a small plugin
+ * carries only what it imports. Run after the build.
  */
 import { execFileSync, execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -31,8 +32,10 @@ try {
 import type { SettingsSchema } from "@evi/api";
 import { createMist, MIST_VERSION } from "${name}";
 import { channel, slot } from "${name}/bus";
+import { accounts, DiscordApiError, discord, format } from "${name}/discord";
 import { defineNative } from "${name}/native";
 import { type ChangeSource, currentUserId, stores, subscribe, useStore } from "${name}/stores";
+import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
 import { fetchJson, isRecord, sleep } from "${name}/util";
 
 const native = defineNative({ add: (a: number, b: number) => a + b });
@@ -46,7 +49,22 @@ export async function run() {
     mist.ctx.onDispose(subscribe([stores.presence, stores.sessions], () => { }));
     const text: string | undefined = mist.safe((line: { text?: string; }) => line.text!.trim(), line => line.text)({});
     const source: ChangeSource = { addChangeListener() { }, removeChangeListener() { } };
-    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep];
+    for await (const message of discord.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
+    // @ts-expect-error a page goes from before or from after, not both
+    discord.messages("1", { before: "1", after: "2" });
+    const when: string = format.ago(Date.now());
+    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, when];
+}
+export function test() {
+    const evi = fakeEvi();
+    const run = fakeContext<typeof settings>({ schema: settings, evi });
+    const loud: number = run.ctx.settings.get("volume");
+    // @ts-expect-error the fake context is typed by the plugin's settings
+    run.ctx.settings.get("missing");
+    const store = fakeStore({ count: 1 });
+    store.change({ count: 2 });
+    evi.addStore("CountStore", store);
+    void [loud, evi.module.findStore("CountStore")];
 }
 `);
     // The tsconfig the README gives a plugin outside an Evi checkout
@@ -64,6 +82,24 @@ export async function run() {
         problems.push(`a file importing every subpath doesn't typecheck against the packed types:\n${(err as { stdout?: string; }).stdout}`);
     }
 
+    // No test runner in sight: plain Node imports the testing subpath and uses it
+    let tested: string;
+    try {
+        tested = execFileSync("node", ["--input-type=module", "-e", `
+import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
+const evi = fakeEvi();
+const run = fakeContext({ settings: { volume: 3 }, evi });
+const store = fakeStore({ n: 1 });
+run.ctx.waitFor(evi.module.filters.byStoreName("NStore"), s => run.ctx.logger.info("found", s.n));
+evi.addStore("NStore", store);
+run.dispose();
+console.log(JSON.stringify([run.ctx.settings.get("volume"), run.logs[0].args]));
+`], { cwd: app, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    } catch (err) {
+        tested = String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => line.startsWith("Error")) ?? String(err);
+    }
+    if (tested !== '[3,["found",1]]') problems.push(`the testing subpath under Node printed ${tested}`);
+
     writeFileSync(join(app, "plugin", "index.ts"), `
 import { createMist } from "${name}";
 import { sleep } from "${name}/util";
@@ -79,7 +115,7 @@ export default mist.define({ async start() { await sleep(10); } });
     else {
         const code = await built.outputs[0].text();
         const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
-        for (const unused of ["native.js", "stores.js", "bus.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
+        for (const unused of ["native.js", "stores.js", "bus.js", "discord.js", "testing.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
         // HttpError stays: mist.native rebuilds one thrown by the native side
         for (const unused of ["function fetchJson", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
         if (!code.includes("function createMist") || !code.includes("function sleep")) problems.push("the bundle lost createMist or sleep");
@@ -105,4 +141,4 @@ if (problems.length) {
     console.error(`Installing ${pkg.name} from its tarball:\n  ${problems.join("\n  ")}`);
     process.exit(1);
 }
-console.log(`${pkg.name} installs from its tarball: npx mist runs, every subpath typechecks, and a plugin bundle carries only what it imports`);
+console.log(`${pkg.name} installs from its tarball: npx mist runs, every subpath typechecks, the testing subpath runs under Node, and a plugin bundle carries only what it imports`);

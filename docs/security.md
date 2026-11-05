@@ -95,6 +95,12 @@ The design keeps other plugins away from a plugin's capability and native side. 
 - Native modules share main. Every plugin's native side runs in Discord's main process with full access, so another plugin's native code can reach this plugin's native module and call `__mist_logs` or `__mist_events` itself.
 - Anyone with the debugging port has everything. The port gives full control of Discord, including the account's token. That is why the gate opens on it, and why Discord should run without it when you aren't debugging.
 
+## The debug report
+
+`mist.report` builds the [debug report](core.md#mistreport) from the plugin's handle, the same view that every plugin on the page can read. Every recorded value shows as its type and size, so a user can paste the report into a public issue without a secret in it. The text it shows whole is mist-api's own warnings, Evi's start error, and Evi's patch errors, which `Mist.status()` already shows to every plugin. A start error is the message of whatever the plugin's `start` threw, so don't put a secret in an error message.
+
+The report doesn't reach the debug capability, so it never contains the open view, even with a debugging port.
+
 ## Version skew
 
 Each plugin bundles its own copy of mist-api, and copies of different versions share one registry. The registry only calls a handle's own methods, so it never needs to understand the records of a copy at another version. `MIST_VERSION` on each handle tells the CLI which copy made it. The registry key ends in `.v1`. A change that a registry from another copy couldn't handle would use a new key.

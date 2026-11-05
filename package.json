@@ -43,6 +43,11 @@
             "import": "./dist/bus.js",
             "default": "./dist/bus.js"
         },
+        "./ui": {
+            "types": "./dist/ui.d.ts",
+            "import": "./dist/ui.js",
+            "default": "./dist/ui.js"
+        },
         "./package.json": "./package.json"
     },
     "main": "./dist/index.js",

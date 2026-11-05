@@ -34,6 +34,7 @@ import { channel, slot } from "${name}/bus";
 import { defineNative } from "${name}/native";
 import { type ChangeSource, currentUserId, stores, subscribe, useStore } from "${name}/stores";
 import { fetchJson, isRecord, sleep } from "${name}/util";
+import { boundary, chatBar, messages, state, useValue } from "${name}/ui";
 
 const native = defineNative({ add: (a: number, b: number) => a + b });
 const settings = { volume: { type: "number", label: "Volume", default: 50 } } satisfies SettingsSchema;
@@ -46,7 +47,12 @@ export async function run() {
     mist.ctx.onDispose(subscribe([stores.presence, stores.sessions], () => { }));
     const text: string | undefined = mist.safe((line: { text?: string; }) => line.text!.trim(), line => line.text)({});
     const source: ChangeSource = { addChangeListener() { }, removeChangeListener() { } };
-    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep];
+    const count = state(0);
+    mist.ctx.onDispose(subscribe(count, () => { }));
+    messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(); });
+    // @ts-expect-error a chat bar button gets ChatBarProps, not a string
+    chatBar.add(mist, "bad", (props: { channel: string; }) => props.channel);
+    void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, boundary, useValue, chatBar.patches];
 }
 `);
     // The tsconfig the README gives a plugin outside an Evi checkout
@@ -79,7 +85,8 @@ export default mist.define({ async start() { await sleep(10); } });
     else {
         const code = await built.outputs[0].text();
         const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
-        for (const unused of ["native.js", "stores.js", "bus.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
+        for (const unused of ["native.js", "stores.js", "bus.js", "ui.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
+        for (const unused of modules.filter(m => m.startsWith("ui/"))) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
         for (const unused of ["function fetchJson", "class HttpError", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
         if (!code.includes("function createMist") || !code.includes("function sleep")) problems.push("the bundle lost createMist or sleep");
     }

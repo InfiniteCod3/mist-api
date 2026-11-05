@@ -5,10 +5,11 @@
 ```ts
 import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, UnknownPluginError, whenConnected } from "@aurologic/mist-api/discord";
 
+// After mist.define, which registers the mist object that discord() checks
 const api = discord(mist);
 ```
 
-`discord(plugin)` takes the plugin's mist object (from `createMist`) or its id, and returns `{ rest, messages }` for that plugin. It must know which plugin is asking, to hold the plugin's requests to its manifest. It throws a `TypeError` for a value with no id.
+`discord(mist)` takes the plugin's own mist object, from `createMist`, after `mist.define`, and returns `{ rest, messages }` for that plugin. It must know which plugin is asking, to hold the plugin's requests to its manifest. It checks the object against the handle that mist's page registry holds for its id, and throws a `TypeError` for anything else: a string id, or another object with the plugin's `id`. Otherwise a plugin could name another plugin and borrow its permissions. [Security model](security.md#permissions-through-mist) explains the check.
 
 A plugin's bundle carries only the parts it imports.
 
@@ -256,7 +257,9 @@ A channel's messages, one at a time, fetched in pages of up to 100. Use it with 
 - With `before`, it starts at the message before that id and goes back, newest first.
 - With `after`, it starts at the message after that id and goes forward, oldest first.
 
-`before` and `after` can't both be given. TypeScript refuses it, and at run time it throws a `TypeError`. `limit` is the number of messages in all, and the default is every message there is. It asks for no more messages than `limit` needs.
+`before` and `after` can't both be given. TypeScript refuses it, and at run time it throws a `TypeError`. `limit` is the number of messages in all, a finite number from 0, and the default is every message there is. It asks for no more messages than `limit` needs.
+
+`api.messages` checks its arguments and the plugin's permissions when you call it, before the loop starts. A bad channel or message id, `before` with `after`, a `limit` that is negative or not finite, and a missing `readMessages` throw there, not at the first `next()`.
 
 It stops at the end of the channel, at `limit`, or when you `break` out of the loop. When Discord answers 429, it waits the `retryAfter` that Discord gives and asks for the same page again, up to 5 times in a row. Any other error is thrown as a `DiscordApiError`. With a `signal`, it stops when the signal aborts, also during a wait, and throws `signal.reason`.
 
@@ -346,7 +349,7 @@ Times and dates in Discord's language, the one picked in Discord's Language sett
 
 `duration` shows `units` units, 2 by default, starting at the largest unit that isn't 0. A unit of 0 among them is left out, so 1 day and 5 minutes is `"1 day"`. `style` is `"long"` by default. `"short"` gives `"1 hr, 2 min"`. Below one second it gives `"0 seconds"`.
 
-`ago` uses years, months, weeks, days, hours, and minutes, and says `"now"` for less than a minute either way. `now` defaults to `Date.now()`.
+`ago` uses years, months, weeks, days, hours, and minutes, and says `"now"` for less than a minute either way. It rounds to the nearest whole unit and picks the unit after rounding, so 59 minutes 50 seconds is `"1 hour ago"`, not `"60 minutes ago"`. `now` defaults to `Date.now()`.
 
 `date` and `ago` take a timestamp in milliseconds, a `Date`, or a string that `Date.parse` reads, such as an API message's `timestamp`. For a date that isn't valid they give `"Invalid Date"`.
 

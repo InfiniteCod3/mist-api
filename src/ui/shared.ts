@@ -3,6 +3,7 @@
  * on globalThis. Patched Discord code reads that state by its Symbol.for key, so the key is the
  * protocol between copies and the patches: change its version when the state's shape changes.
  */
+import { need, pluginOf } from "../permissions.ts";
 import { errorMessage } from "../protocol.ts";
 
 /** What mist.log and Evi's ctx.logger both have */
@@ -18,20 +19,31 @@ export interface MistOwner {
     readonly log: ErrorLog;
 }
 
-/** A plugin's context, for plugins that don't use mist.define */
+/** A plugin's context, for a host of a plugin that doesn't use mist.define */
 export interface ContextOwner {
     readonly id: string;
     onDispose(fn: () => void): unknown;
     readonly logger: ErrorLog;
 }
 
-/** The plugin that adds an entry: it's removed when the plugin stops, and its errors go to the plugin's log */
+/** The plugin that sets a host: it's cleared when the plugin stops, and its errors go to the plugin's log */
 export type Owner = MistOwner | ContextOwner;
 
 export interface Owned {
     readonly id: string;
     readonly log: ErrorLog;
     onDispose(fn: () => void): void;
+}
+
+/**
+ * The owner of a registry entry: the plugin's own mist object, checked against mist's page registry
+ * (pluginOf). With `reads`, the entry hands the plugin message content, so its manifest must declare
+ * readMessages, or nothing, as Evi's guard asks of a hook on sending and editing.
+ */
+export function entryOwner(mist: MistOwner, usage: string, reads: boolean): Owned {
+    const id = pluginOf(mist, usage);
+    if (reads) need(id, "readMessages", usage);
+    return owned(mist);
 }
 
 export function owned(owner: Owner): Owned {

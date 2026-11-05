@@ -59,7 +59,9 @@ export async function run() {
     for await (const message of api.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
     // @ts-expect-error a page goes from before or from after, not both
     api.messages("1", { before: "1", after: "2" });
-    const me: unknown = await discord("check").rest.get("/users/@me");
+    const me: unknown = await api.rest.get("/users/@me");
+    // @ts-expect-error discord() takes the plugin's mist object, not an id
+    discord("check");
     const when: string = format.ago(Date.now());
     void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, PluginPermissionError, me, when, boundary, useValue, chatBar.patches];
 }
@@ -128,6 +130,25 @@ export default mist.define({ async start() { await sleep(10); } });
         // HttpError stays: mist.native rebuilds one thrown by the native side
         for (const unused of ["function fetchJson", "function isRecord"]) if (code.includes(unused)) problems.push(`the bundle carries ${unused} from util.js, which the plugin doesn't use`);
         if (!code.includes("function createMist") || !code.includes("function sleep")) problems.push("the bundle lost createMist or sleep");
+    }
+
+    // The discord and ui subpaths share mist's permission checks, and neither carries the other
+    for (const [subpath, use, other] of [["discord", "discord(mist)", "ui/"], ["ui", "messages.beforeSend(mist, \"x\", () => { })", "discord/"]] as const) {
+        const entry = join(app, "plugin", `${subpath}.ts`);
+        writeFileSync(entry, `
+import { createMist } from "${name}";
+import { ${subpath === "discord" ? "discord" : "messages"} } from "${name}/${subpath}";
+export const mist = createMist("tiny");
+export default mist.define({ start() { ${use}; } });
+`);
+        const one = await Bun.build({ entrypoints: [entry], target: "browser", format: "cjs", external: ["@evi/api", "react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"] });
+        if (!one.success) problems.push(`bundling a plugin that uses ${subpath} failed: ${one.logs.join(" ")}`);
+        else {
+            const code = await one.outputs[0].text();
+            const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
+            if (!modules.includes("permissions.js")) problems.push(`a plugin that uses ${subpath} lost permissions.js`);
+            for (const unused of modules.filter(m => m.startsWith(other))) problems.push(`a plugin that uses only ${subpath} carries ${unused}`);
+        }
     }
 
     writeFileSync(join(app, "plugin", "native.ts"), `

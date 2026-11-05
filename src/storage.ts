@@ -117,6 +117,12 @@ function store(name: string): KeyValueStore {
             request.onsuccess = () => {
                 try {
                     const next = fn(parse(request.result));
+                    // The transaction would commit before the promise settled, storing it as {}. Its own
+                    // rejection is dropped: the TypeError is what update rejects with.
+                    if (typeof (next as { then?: unknown; } | null)?.then === "function") {
+                        Promise.resolve(next).catch(() => { });
+                        throw new TypeError(`update's function must be synchronous: it returned a promise for ${JSON.stringify(key)}, so nothing was stored`);
+                    }
                     if (next === undefined) {
                         kv.delete(key);
                         return done(undefined);

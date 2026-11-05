@@ -1,5 +1,6 @@
 /** A stand-in for Electron's main-process module, preloaded for every test (bunfig.toml). Tests set `electron`'s fields. */
 import { mock } from "bun:test";
+import { EventEmitter } from "node:events";
 
 export interface FakeWindow {
     id: number;
@@ -14,6 +15,8 @@ export const electron = {
     dialogCalls: [] as { parent: unknown; options: { properties?: string[]; }; }[],
     encryptionAvailable: true,
     backend: "gnome_libsecret",
+    /** Electron's app, as far as its events go: `electron.app.emit("will-quit")` is Discord quitting */
+    app: new EventEmitter(),
 };
 
 const asWindow = (w: FakeWindow) => ({
@@ -26,6 +29,7 @@ const KEY = 0x5a;
 const xor = (bytes: Buffer) => Buffer.from(bytes.map(b => b ^ KEY));
 
 mock.module("electron", () => ({
+    app: electron.app,
     BrowserWindow: {
         getAllWindows: () => electron.windows.map(asWindow),
         fromId: (id: number) => {

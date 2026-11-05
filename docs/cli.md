@@ -195,7 +195,7 @@ Prints each Flux action that Discord dispatches, one line per action as `<time> 
 
 Without `-f`, `flux` stops after `-n` actions, 50 by default. With `-f`, it prints until you press Ctrl+C. A second Ctrl+C exits at once. Discord dispatches many actions each second, so watching every action with `-f` prints a lot.
 
-The listener lives in the page, and the CLI reads what it kept every 250 ms. The page keeps the newest 1000 actions between reads. When it drops older ones, `flux` prints `… <n> actions dropped`. When `flux` stops, it removes the listener. If the CLI ends without doing that, for example when it is killed, the page removes the listener 15 seconds after the last read. A page reload removes it too. In both cases a CLI that still runs prints `The page ended the watch`.
+The listener lives in the page, and the CLI reads what it kept every 250 ms. The page keeps the newest 1000 actions between reads, on `globalThis`, where every plugin can read them, message text included, until the CLI reads them or the watch ends. When it drops older ones, `flux` prints `… <n> actions dropped`. When `flux` stops, it removes the listener. If the CLI ends without doing that, for example when it is killed, the page removes the listener 15 seconds after the last read. A page reload removes it too. In both cases a CLI that still runs prints `The page ended the watch`.
 
 Each payload is copied when the action is dispatched, with the masking that recorded values get: fields and `Map` keys named like secrets show as `"[secret]"`. Some actions, such as `CONNECTION_OPEN`, carry tokens and session ids, and those fields are masked. A bare string has no name, so it is never masked. Values are cut to the display bounds:
 

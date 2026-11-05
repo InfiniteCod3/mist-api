@@ -77,7 +77,7 @@ export interface FakeEvi {
 }
 
 export interface FakeEviOptions {
-    /** React for code that imports it from @evi/api; reading module.React without it throws */
+    /** React for code that imports it from @evi/api. Without it, reading module.React throws, and spreading module leaves React out. */
     React?: EviApi["React"];
 }
 
@@ -122,12 +122,14 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
                 return () => void waiting.delete(waiter);
             },
             Dispatcher: fakeDispatcher(),
-            get React(): EviApi["React"] {
-                if (!options.React) throw new Error("fakeEvi was made without React: pass fakeEvi({ React })");
-                return options.React;
-            },
+            React: options.React!,
         },
     };
+    // Not enumerable, so `{ ...evi.module, x }` leaves it out instead of throwing
+    if (!options.React) Object.defineProperty(evi.module, "React", {
+        get() { throw new Error("fakeEvi was made without React: pass fakeEvi({ React })"); },
+        enumerable: false,
+    });
     return evi;
 }
 

@@ -55,6 +55,17 @@ test("update that returns undefined deletes the key, and one that throws changes
     expect(await storage.get("b")).toBe(1);
 });
 
+test("update with an async function rejects, saying it must be synchronous, and stores nothing", async () => {
+    const store = createMist("t-storage-async").storage;
+    await store.set("count", 1);
+    const err = await store.update("count", async value => (value as number) + 1).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(TypeError);
+    expect((err as Error).message).toStartWith("update's function must be synchronous");
+    expect(await store.get("count")).toBe(1);
+    // A rejecting async function doesn't leave an unhandled rejection behind
+    await expect(store.update("count", async () => { throw new Error("late"); })).rejects.toThrow("must be synchronous");
+});
+
 test("a value JSON can't write rejects and stores nothing", async () => {
     const storage = createMist("t-storage-json").storage;
     await expect(storage.set("big", 1n)).rejects.toThrow(/BigInt/);

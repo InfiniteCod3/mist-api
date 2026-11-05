@@ -2,7 +2,7 @@ import type { NativeContext } from "@evi/api/native";
 import { afterAll, expect, test } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -184,7 +184,7 @@ test("jsonFile's flush writes the last value even with writes racing, and leaves
     expect(readdirSync(dirname(file.path)).filter(f => f.endsWith(".tmp"))).toEqual([]);
 });
 
-test("jsonFile keeps a file it can't read as .bad and starts from initial, and refuses a value over maxBytes or a bad name", () => {
+test("jsonFile keeps a file it can't parse as .bad and starts from initial, and refuses a value over maxBytes or a bad name", () => {
     const { ctx } = nativeContext("t-bad");
     const folder = dataFolder(ctx);
     writeFileSync(join(folder, "broken.json"), "{ not json");
@@ -200,6 +200,65 @@ test("jsonFile keeps a file it can't read as .bad and starts from initial, and r
     expect(small.get()).toBe("");
     for (const name of ["../escape", "a/b", "", "mist-secrets", ".hidden"]) expect(() => jsonFile(ctx, name, { initial: 0 })).toThrow(/Bad file name/);
     expect(() => dataFolder({ ...ctx, pluginId: "../other" })).toThrow();
+});
+
+test("jsonFile leaves a file it can't read alone, and get and set throw until it can be read, so no write replaces it", () => {
+    const { ctx, dataDir, dispose } = nativeContext("t-unreadable");
+    const folder = dataFolder(ctx);
+    const kept = JSON.stringify({ notes: "x".repeat(50) });
+    writeFileSync(join(folder, "big.json"), kept);
+    const big = jsonFile(ctx, "big", { initial: {}, maxBytes: 20 });
+    expect(() => big.get()).toThrow(expect.objectContaining({ name: "NativeError", code: "file-unreadable" }));
+    expect(() => big.set({})).toThrow(NativeError);
+    dispose();
+    expect(readFileSync(join(folder, "big.json"), "utf8")).toBe(kept);
+    expect(existsSync(join(folder, "big.json.bad"))).toBe(false);
+
+    // A folder where the file should be fails the read with EISDIR, as a locked file fails it with EBUSY
+    mkdirSync(join(folder, "locked.json"));
+    const locked = jsonFile(nativeContext("t-unreadable", dataDir).ctx, "locked", { initial: 1 });
+    expect(() => locked.get()).toThrow("locked.json couldn't be read (EISDIR)");
+    rmdirSync(join(folder, "locked.json"));
+    expect(locked.get()).toBe(1);
+    locked.set(2);
+    expect(locked.get()).toBe(2);
+});
+
+test("helpers for one file in a native run share it, so two of them don't overwrite each other's writes", () => {
+    const { ctx, dataDir, dispose } = nativeContext("t-shared");
+    secrets(ctx).set("a", "1");
+    secrets(ctx).set("b", "2");
+    const counter = jsonFile(ctx, "counter", { initial: 0, debounceMs: 60_000 });
+    expect(jsonFile(ctx, "counter", { initial: 0 })).toBe(counter);
+    jsonFile(ctx, "counter", { initial: 0 }).set(n => n + 1);
+    counter.set(n => n + 1);
+    dispose();
+
+    const next = nativeContext("t-shared", dataDir).ctx;
+    expect([secrets(next).get("a"), secrets(next).get("b")]).toEqual(["1", "2"]);
+    expect(jsonFile(next, "counter", { initial: 0 }).get()).toBe(2);
+});
+
+test("when Discord quits, pending writes are flushed and lifetime children killed; a stopped run's quit listeners are gone", async () => {
+    const listeners = () => [electron.app.listenerCount("will-quit"), process.listenerCount("exit")];
+    const before = listeners();
+    const { ctx, dispose } = nativeContext("t-quit");
+    const prefs = jsonFile(ctx, "prefs", { initial: 0, debounceMs: 60_000 });
+    prefs.set(5);
+    secrets(ctx).set("token", "t");
+    const child = lifetime(ctx).spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+    await new Promise(resolve => child.once("spawn", resolve));
+    let exited = false;
+    child.once("exit", () => { exited = true; });
+    expect(listeners()).toEqual([before[0] + 1, before[1] + 1]);
+
+    electron.app.emit("will-quit");
+    expect(JSON.parse(readFileSync(prefs.path, "utf8"))).toBe(5);
+    expect(Object.keys(JSON.parse(readFileSync(join(dataFolder(ctx), "mist-secrets.json"), "utf8")))).toEqual(["token"]);
+    await waitFor(() => exited);
+
+    dispose();
+    expect(listeners()).toEqual(before);
 });
 
 test("secrets are stored encrypted in the plugin's folder and read back; they report plaintext fallback and refuse without encryption", async () => {

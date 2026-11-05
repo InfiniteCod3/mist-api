@@ -21,11 +21,12 @@ export type { EventsAnswer } from "./protocol.ts";
 /** Anything a native module exports besides start and stop is callable from the page */
 type Method = (...args: any[]) => unknown;
 
-/** `this` inside a native method: the module, plus what belongs to this one call */
+/** `this` inside a native method, start and stop: the module, plus what belongs to this one call */
 export interface NativeCall {
     /**
      * Aborts when the page aborts this call (`mist.native.method.with({ signal })`) or the native side
-     * stops. A call made without a signal, or from a page without mist 0.3, only aborts on stop.
+     * stops. A call made without a signal, or from a page without mist 0.3, only aborts on stop. In
+     * start and stop it is the run's signal, which aborts once stop returns.
      */
     readonly signal: AbortSignal;
 }
@@ -123,6 +124,8 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
 
     const lifecycle = methods as { start?: (ctx: NativeContext) => void; stop?: () => void; };
     const module: Record<string, unknown> = {};
+    // A proxy, not Object.create(module): a method that keeps state on `this` must still write to the module
+    const withSignal = (signal: AbortSignal): object => new Proxy(module, { get: (target, key) => key === "signal" ? signal : Reflect.get(target, key) });
 
     function invoke(name: string, fn: Method, outer: unknown, args: unknown[]) {
         const mark = isCallMark(args.at(-1)) ? args.pop() as CallMark : undefined;
@@ -134,8 +137,7 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
             abortable.set(mark.id, controller);
             signal = AbortSignal.any([run.signal, controller.signal]);
         }
-        // A proxy, not Object.create(module): a method that keeps state on `this` must still write to the module
-        const receiver: object = inherited ? outer : new Proxy(module, { get: (target, key) => key === "signal" ? signal : Reflect.get(target, key) });
+        const receiver: object = inherited ? outer : withSignal(signal);
         callThis.add(receiver);
         const forget = () => { if (controller) abortable.delete(mark!.id!); };
 
@@ -168,16 +170,16 @@ export function defineNative<M extends Record<string, Method>, E = never, R exte
             return invoke(name, fn as Method, this, args);
         };
     }
-    module.start = function (this: unknown, ctx: NativeContext) {
+    module.start = function (ctx: NativeContext) {
         self.prefix = `[${ctx.pluginId}]`;
         if (run.signal.aborted) run = new AbortController();
         channel?.start();
         asks?.start();
-        return lifecycle.start?.call(this, ctx);
+        return lifecycle.start?.call(withSignal(run.signal), ctx);
     };
-    module.stop = function (this: unknown) {
+    module.stop = function () {
         try {
-            return lifecycle.stop?.call(this);
+            return lifecycle.stop?.call(withSignal(run.signal));
         } finally {
             run.abort(new DOMException(`${self.prefix.slice(1, -1)}'s native side stopped`, "AbortError"));
             abortable.clear();

@@ -21,7 +21,7 @@ export function copyOfSources(version: string, eviApi?: string) {
     // The preloaded Electron stand-in is found from tests/ only; a copy's imports just need to resolve
     mkdirSync(join(dir, "node_modules", "electron"), { recursive: true });
     writeFileSync(join(dir, "node_modules", "electron", "package.json"), JSON.stringify({ type: "module", main: "index.js" }));
-    writeFileSync(join(dir, "node_modules", "electron", "index.js"), "export const BrowserWindow = {}, dialog = {}, safeStorage = {};");
+    writeFileSync(join(dir, "node_modules", "electron", "index.js"), "export const BrowserWindow = {}, dialog = {}, safeStorage = {}, app = { on() { }, removeListener() { } };");
     return { dir, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 

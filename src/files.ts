@@ -4,7 +4,9 @@ import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSyn
 import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { NativeError } from "./errors.ts";
 import { log } from "./native.ts";
+import { atQuit } from "./quit.ts";
 
 const SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
@@ -36,7 +38,7 @@ export function writeAtomicSync(path: string, text: string) {
 }
 
 export interface JsonFileOptions<T> {
-    /** The value when the file is missing or can't be read */
+    /** The value when the file is missing or can't be parsed */
     initial: T;
     /**
      * Turns what JSON.parse read into a T, or throws. Left out, the file's value is used when it has
@@ -51,8 +53,9 @@ export interface JsonFileOptions<T> {
 
 export interface JsonFile<T> {
     readonly path: string;
+    /** Throws when the file couldn't be read */
     get(): T;
-    /** Changes the value now and writes it after debounceMs. Throws a RangeError when the JSON is over maxBytes. */
+    /** Changes the value now and writes it after debounceMs. Throws a RangeError when the JSON is over maxBytes, and when the file couldn't be read. */
     set(value: T | ((current: T) => T)): void;
     /** Writes a pending change now */
     flush(): Promise<void>;
@@ -63,34 +66,69 @@ const jsonType = (value: unknown) => value === null ? "null" : Array.isArray(val
 /**
  * A JSON file in the plugin's own folder (dataFolder), read once when made and kept in memory.
  * Writes go to a temporary file renamed over the old one. A pending write is flushed when the
- * native side stops. A file that can't be read or parsed is renamed to `<name>.json.bad`, and the
- * value starts from `initial`.
+ * native side stops and when Discord quits. A file that can't be parsed, or doesn't have the shape
+ * `parse` wants, is renamed to `<name>.json.bad`, and the value starts from `initial`. A file that
+ * can't be read at all (locked, no access, over maxBytes) is left alone, and get and set throw a
+ * NativeError "file-unreadable" until a later try reads it.
+ * Every jsonFile of one name in a native run is the same object, made with the first call's options.
  */
 export function jsonFile<T>(ctx: NativeContext, name: string, options: JsonFileOptions<T>): JsonFile<T> {
     if (!SAFE_NAME.test(name) || name.startsWith("mist-")) throw new Error(`Bad file name ${JSON.stringify(name)}: use letters, digits, _ . and -, not starting with mist-`);
     return openJson(ctx, name, options);
 }
 
+/** The files open in each native run, by path, so two helpers for one file share its value and writes */
+const open = new WeakMap<NativeContext, Map<string, JsonFile<unknown>>>();
+
 /** jsonFile without the name check, for mist's own `mist-` files */
 export function openJson<T>(ctx: NativeContext, name: string, options: JsonFileOptions<T>): JsonFile<T> {
+    const path = join(dataFolder(ctx), `${name}.json`);
+    let files = open.get(ctx);
+    if (!files) open.set(ctx, files = new Map());
+    let file = files.get(path) as JsonFile<T> | undefined;
+    if (!file) files.set(path, (file = makeJson(ctx, name, path, options)) as JsonFile<unknown>);
+    return file;
+}
+
+function makeJson<T>(ctx: NativeContext, name: string, path: string, options: JsonFileOptions<T>): JsonFile<T> {
     const { initial, maxBytes = 5 * 1024 * 1024, debounceMs = 500 } = options;
     const parse = options.parse ?? ((raw: unknown) => {
         if (jsonType(raw) !== jsonType(initial)) throw new TypeError(`expected ${jsonType(initial)}, found ${jsonType(raw)}`);
         return raw as T;
     });
-    const path = join(dataFolder(ctx), `${name}.json`);
 
     let value = initial;
-    try {
-        const { size } = statSync(path);
-        if (size > maxBytes) throw new RangeError(`${size} bytes is over maxBytes (${maxBytes})`);
-        value = parse(JSON.parse(readFileSync(path, "utf8")));
-    } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-            log.warn(`Couldn't read ${path}, kept as ${name}.json.bad; starting from the initial value`, err);
+    /** Set while the file exists but can't be read: a write then would replace data nobody has seen */
+    let failure: NativeError | undefined;
+
+    function load() {
+        failure = undefined;
+        let raw: string;
+        try {
+            const { size } = statSync(path);
+            if (size > maxBytes) throw new RangeError(`${size} bytes is over maxBytes (${maxBytes})`);
+            raw = readFileSync(path, "utf8");
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === "ENOENT") return;
+            failure = new NativeError("file-unreadable", { file: `${name}.json` }, `${name}.json couldn't be read (${code ?? (err as Error).message}); it's left as it is, and reading or changing it throws until it can be read`);
+            return;
+        }
+        try {
+            value = parse(JSON.parse(raw));
+        } catch (err) {
+            log.warn(`Couldn't parse ${path}, kept as ${name}.json.bad; starting from the initial value`, err);
             try { renameSync(path, `${path}.bad`); } catch { }
         }
     }
+    load();
+    if (failure) log.error(failure.message);
+    /** Throws while the file can't be read, trying it again first */
+    const usable = () => {
+        if (!failure) return;
+        load();
+        if (failure) throw failure;
+    };
 
     let text: string | undefined;
     let version = 0;
@@ -128,11 +166,16 @@ export function openJson<T>(ctx: NativeContext, name: string, options: JsonFileO
     }
 
     ctx.onDispose(flushSync);
+    atQuit(ctx, flushSync);
 
     return {
         path,
-        get: () => value,
+        get() {
+            usable();
+            return value;
+        },
         set(next) {
+            usable();
             const updated = typeof next === "function" ? (next as (current: T) => T)(value) : next;
             const serialized = JSON.stringify(updated);
             if (serialized === undefined) throw new TypeError(`${name}.json can't hold ${typeof updated}`);

@@ -95,3 +95,22 @@ test("defineNative's quiet methods are counted in the answer to the page and not
     // @ts-expect-error quiet names the module's own methods
     void (() => fresh.defineNative({ poll() { } }, { quiet: ["pol"] }));
 }));
+
+test("start and stop get the run's this.signal, which aborts once stop returns, and a new start gets a new one", () => withFreshNative(fresh => {
+    const seen: { where: string; signal: AbortSignal; aborted: boolean; }[] = [];
+    const made = fresh.defineNative({
+        start() { seen.push({ where: "start", signal: this.signal, aborted: this.signal.aborted }); },
+        stop() { seen.push({ where: "stop", signal: this.signal, aborted: this.signal.aborted }); },
+        ping() { return this.signal; },
+    });
+    const ctx = { pluginId: "t-run-signal" } as NativeContext;
+    made.start(ctx);
+    const during = made.ping() as AbortSignal;
+    made.stop();
+    made.start(ctx);
+    expect(seen.map(s => [s.where, s.signal instanceof AbortSignal, s.aborted])).toEqual([["start", true, false], ["stop", true, false], ["start", true, false]]);
+    expect(seen[1].signal).toBe(seen[0].signal);
+    expect(seen[0].signal.aborted).toBe(true);
+    expect(during.aborted).toBe(true);
+    expect(seen[2].signal).not.toBe(seen[0].signal);
+}));

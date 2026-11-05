@@ -60,6 +60,8 @@ On stop, the scope does these things:
 - It destroys every `window` that isn't destroyed yet.
 - It ends every child from `spawn` that hasn't exited. It sends `SIGTERM`, and `SIGKILL` if the child is still running after `killAfterMs`. On Windows both end the process at once.
 
+Evi doesn't stop native sides when Discord quits, so the scope also sends `SIGTERM` to every child from `spawn` that hasn't exited when Discord quits: on Electron's `will-quit`, and on Node's `exit` for Evi's own restarts, which skip Electron's quit events. Main exits right after, so no `SIGKILL` follows. Timers and windows end with the process anyway.
+
 `interval` and `timeout` return a function that clears the timer sooner. `spawn` takes `node:child_process`'s options and returns its `ChildProcess`. It adds an `error` listener, so a program that fails to start doesn't throw in main. Add your own to hear about it.
 
 After the stop, every method throws a `NativeError` with the code `stopped`. A new run needs a new scope, so make it in `start`, not at module load.
@@ -142,7 +144,9 @@ interface JsonFile<T> {
 }
 ```
 
-A JSON file, `<name>.json` in the plugin's `dataFolder`, read once when it's made and then kept in memory. `get` returns the value in memory. `set` changes it at once and writes the file `debounceMs` later, so many sets in a row are one write. `flush` writes a pending change now. When the native side stops, a pending change is written before the stop ends, so a value set in `stop` is kept too.
+A JSON file, `<name>.json` in the plugin's `dataFolder`, read once when it's made and then kept in memory. `get` returns the value in memory. `set` changes it at once and writes the file `debounceMs` later, so many sets in a row are one write. `flush` writes a pending change now. A pending change is flushed on stop and when Discord quits. When the native side stops, it is written before the stop ends, so a value set in `stop` is kept too. Evi doesn't stop native sides when Discord quits, so `jsonFile` also writes a pending change, synchronously, on Electron's `will-quit` and on Node's `exit`, which Evi's own restarts reach without `will-quit`. Each run of the native side adds one listener for each and removes them when it stops, so hot reloads don't add up.
+
+Every `jsonFile` of the same name in one run of the native side is the same object, made with the first call's options, so two of them share the value and the writes instead of overwriting each other. `secrets` and `pathGrants` share their files the same way. A new run reads the file again.
 
 ```ts
 interface Prefs {
@@ -165,13 +169,15 @@ export default defineNative({
 });
 ```
 
-Each write goes to a temporary file in the same folder, which is then renamed over the old file. A crash during a write leaves the old file or the new one, never half of one. A file that can't be read, can't be parsed, or that `parse` throws for is renamed to `<name>.json.bad` and logged, and the value starts from `initial`.
+Each write goes to a temporary file in the same folder, which is then renamed over the old file. A crash during a write leaves the old file or the new one, never half of one. A file that can't be parsed, or that `parse` throws for, is renamed to `<name>.json.bad` and logged, and the value starts from `initial`. A missing file starts from `initial` too.
+
+A file that exists but can't be read is left as it is, because its data may be fine: it may be locked by another program (`EBUSY`, `EPERM`), not readable (`EACCES`), or over `maxBytes`. `get` and `set` then throw a `NativeError` with the code `file-unreadable` that names the file and the reason, so no write replaces the file. Each of them tries the read again first, so the file works again once it can be read.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `initial` | required | The value when the file is missing or can't be read. |
+| `initial` | required | The value when the file is missing or can't be parsed. |
 | `parse` | type check | Turns what `JSON.parse` read into a `T`, or throws. Without it, the file's value is used when it has the same JSON type as `initial`: object, array, string, number, boolean, or null. |
-| `maxBytes` | 5 MiB | The largest file read. A `set` whose JSON is larger throws a `RangeError` and changes nothing. |
+| `maxBytes` | 5 MiB | The largest file read. A larger file is left alone, and `get` and `set` throw `file-unreadable`. A `set` whose JSON is larger throws a `RangeError` and changes nothing. |
 | `debounceMs` | `500` | How many ms after a `set` the file is written. |
 
 `name` is letters, digits, `_`, `.`, and `-`, and doesn't start with `.` or `mist-`. Names that start with `mist-` are mist-api's own. A failed write is logged with `log.error`, and the value stays in memory for the next write.
@@ -203,7 +209,7 @@ Know what this protects against before you rely on it:
 - It doesn't keep a secret from other plugins. Every plugin's native code runs in the same main process, can call `safeStorage` too, and can read this file. A plugin with a native side can read every other plugin's secrets.
 - `encrypted` is `false` when `safeStorage` can't encrypt at all, and on Linux without a keyring, where Electron falls back to a key built into Chromium (`basic_text`). Anyone who can read the file can decrypt a secret then. Tell the user, or don't store the secret.
 
-`set` and `get` throw a `NativeError` with the code `secrets-unavailable` when `safeStorage` can't encrypt, and `get` throws `secret-unreadable` when a stored secret doesn't decrypt, as after the OS keyring changed. A name is 1 to 100 letters, digits, `_`, `.`, and `-`, or the call throws `bad-name`.
+`set` and `get` throw a `NativeError` with the code `secrets-unavailable` when `safeStorage` can't encrypt, and `get` throws `secret-unreadable` when a stored secret doesn't decrypt, as after the OS keyring changed. A name is 1 to 100 letters, digits, `_`, `.`, and `-`, or the call throws `bad-name`. Like a [`jsonFile`](#jsonfile), every call throws `file-unreadable` while `mist-secrets.json` exists but can't be read, and `pathGrants` does the same for `mist-grants.json`.
 
 Never return a secret to the page, which shares its JavaScript with Discord and every other plugin. Use it in native code, such as in a request's headers.
 

@@ -50,8 +50,15 @@ afterAll(() => {
     pageGlobals.Evi = eviBefore;
 });
 
+/** A plugin's mist object, defined, so mist's page registry holds its handle */
+function mistOf(id: string) {
+    const mist = createMist(id);
+    mist.define({});
+    return mist;
+}
+
 /** Loaded, declaring nothing: held to nothing */
-const api = discord("t-discord");
+const api = discord(mistOf("t-discord"));
 
 const ME = "100000000000000001", ALT = "100000000000000002";
 const userStore = (id: string | undefined) => ({ getCurrentUser: () => id ? { id, username: "me" } : undefined });
@@ -271,7 +278,7 @@ test("messages waits out a 429 and asks for the same page again", async () => {
 test("messages skips entries that aren't messages and refuses both before and after", async () => {
     serve(() => ({ ok: true, status: 200, body: [{ id: "2", channel_id: "9", content: "ok", timestamp: "t", author: { id: "5", username: "a" } }, { id: "1" }, null] }));
     expect(await collect(api.messages("9"))).toEqual([2]);
-    await expect(collect(api.messages("9", { before: "1", after: "2" } as never))).rejects.toThrow(TypeError);
+    expect(() => api.messages("9", { before: "1", after: "2" } as never)).toThrow(TypeError);
 });
 
 const ok = () => ({ ok: true, status: 200, body: [] });
@@ -279,7 +286,7 @@ const ok = () => ({ ok: true, status: 200, body: [] });
 function declared(permissions: Record<string, unknown>) {
     declarations = { "t-declared": permissions };
     serve(ok);
-    return discord("t-declared");
+    return discord(mistOf("t-declared"));
 }
 const refusal = (promise: Promise<unknown>) => promise.then(() => undefined, (e: unknown) => e);
 
@@ -336,7 +343,14 @@ test("a path is read as Discord's API reads it: escapes, repeated and trailing s
 });
 
 test("messages is refused without readMessages, before any page is asked for", async () => {
-    const err = await refusal(collect(declared({ network: ["discord.com"] }).messages("9")));
+    const refused = (pages: () => unknown) => {
+        try {
+            pages();
+        } catch (err) {
+            return err;
+        }
+    };
+    const err = refused(() => declared({ network: ["discord.com"] }).messages("9"));
     expect(err).toMatchObject({ name: "PluginPermissionError", permission: "readMessages", target: "/channels/9/messages", message: "t-declared can't read messages (/channels/9/messages): its manifest doesn't declare permissions.readMessages" });
     expect(await refusal(collect(declared({ readMessages: true }).messages("9")))).toMatchObject({ permission: "network" });
     expect(requests).toHaveLength(0);
@@ -348,7 +362,7 @@ test("messages is refused without readMessages, before any page is asked for", a
 test("a plugin that declares nothing is allowed everything, as Evi allows it", async () => {
     declarations = { "t-undeclared": undefined };
     serve(ok);
-    const plugin = discord("t-undeclared");
+    const plugin = discord(mistOf("t-undeclared"));
     await plugin.rest.post("/channels/1/messages");
     await plugin.rest.patch("/users/@me/settings-proto/1");
     await collect(plugin.messages("9"));
@@ -357,20 +371,35 @@ test("a plugin that declares nothing is allowed everything, as Evi allows it", a
 
 test("an id Evi has no plugin by is refused, so a made-up id isn't a plugin that declares nothing", async () => {
     serve(ok);
-    const err = await refusal(discord("t-made-up").rest.get("/users/@me"));
+    const madeUp = discord(mistOf("t-made-up"));
+    const err = await refusal(madeUp.rest.get("/users/@me"));
     expect(err).toMatchObject({ name: "UnknownPluginError", plugin: "t-made-up" });
-    expect(await refusal(collect(discord("t-made-up").messages("9")))).toMatchObject({ name: "UnknownPluginError" });
+    expect(() => madeUp.messages("9")).toThrow(expect.objectContaining({ name: "UnknownPluginError" }));
     expect(requests).toHaveLength(0);
 });
 
-test("discord takes the plugin's mist object, and refuses what has no id", async () => {
-    const mist = createMist("t-declared");
-    declarations = { "t-declared": { network: ["discord.com"] } };
+test("discord takes only the plugin's own mist object, so a plugin can't borrow another's permissions by naming its id", async () => {
+    const mist = mistOf("t-declared");
+    declarations = { "t-declared": { network: ["discord.com"] }, "t-borrower": { network: ["discord.com"] } };
     serve(ok);
     expect(await refusal(discord(mist).rest.post("/channels/1/messages"))).toMatchObject({ plugin: "t-declared", permission: "sendMessages" });
-    expect(() => discord("")).toThrow(TypeError);
-    expect(() => discord({} as never)).toThrow(TypeError);
-    expect(() => discord(null as never)).toThrow(TypeError);
+    // t-discord declares nothing, so it may send: naming it must not lend that to another plugin
+    for (const forged of ["t-discord", { id: "t-discord" }, { id: "t-discord", log: mist.log }, "", {}, null]) {
+        expect(() => discord(forged as never)).toThrow(TypeError);
+    }
+    expect(() => discord("t-discord" as never)).toThrow("discord() takes the plugin's own mist object, from createMist, after mist.define; got the string \"t-discord\"");
+    // Made but never defined: the registry holds no handle for it
+    expect(() => discord(createMist("t-borrower"))).toThrow(TypeError);
+    expect(requests).toHaveLength(0);
+});
+
+test("messages checks its arguments and the permission when called, not at the first next()", () => {
+    serve(ok);
+    for (const limit of [-1, Infinity, NaN, "5"]) expect(() => api.messages("9", { limit: limit as number })).toThrow(TypeError);
+    expect(() => api.messages("not an id")).toThrow(TypeError);
+    expect(() => api.messages("9", { before: "x" })).toThrow(TypeError);
+    expect(() => declared({ network: ["discord.com"] }).messages("9")).toThrow(PluginPermissionError);
+    expect(requests).toHaveLength(0);
 });
 
 test("navigate goes through Discord's router and refuses what isn't a path", () => {
@@ -445,6 +474,13 @@ test("format writes in Discord's language, not the system's, and follows a chang
     expect(format.ago(at - 5 * 60_000, at)).toBe("5 minutes ago");
     expect(format.ago(at + 2 * 3_600_000, at)).toBe("in 2 hours");
     expect(format.ago(at - 10_000, at)).toBe("now");
+    // Rounded to a whole larger unit, it reads as that unit
+    expect(format.ago(at - 3590_000, at)).toBe("1 hour ago");
+    expect(format.ago(at + 3590_000, at)).toBe("in 1 hour");
+    expect(format.ago(at - 86_399_000, at)).toBe("yesterday");
+    expect(format.ago(at - 89 * 60_000, at)).toBe("1 hour ago");
+    expect(format.ago(at - 90 * 60_000, at)).toBe("2 hours ago");
+    expect(format.ago(at - 6.6 * 86_400_000, at)).toBe("last week");
     expect(format.date("not a date")).toBe("Invalid Date");
 });
 

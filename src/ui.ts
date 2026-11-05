@@ -14,3 +14,4 @@ export type { AccessoryProps, ChatBarButtonProps, ChatBarProps, EntryOptions, Me
 export type { ContextOwner, ErrorLog, MistOwner, Owner } from "./ui/shared.ts";
 export { state, useValue } from "./ui/state.ts";
 export type { Readable, State } from "./ui/state.ts";
+export { PluginPermissionError, UnknownPluginError } from "./permissions.ts";

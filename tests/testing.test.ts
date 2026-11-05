@@ -50,6 +50,10 @@ test("fakeEvi finds stores by name, throws while not ready, and records each loo
     expect(() => evi.module.findStore("UserStore")).toThrow();
     expect(evi.lookups).toEqual(["UserStore", "NoStore", "NoStore", "UserStore"]);
     expect(() => evi.module.React).toThrow("fakeEvi({ React })");
+    // As docs/testing.md suggests for a module mock that adds members
+    const extended = { ...evi.module, showToast: () => { } };
+    expect(extended.findStore).toBe(evi.module.findStore);
+    expect("React" in extended).toBe(false);
 });
 
 test("fakeEvi's waitFor calls back at once for a store that exists, later for one added, and not after it stops", () => {

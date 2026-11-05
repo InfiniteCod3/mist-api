@@ -58,22 +58,32 @@ function abortable<T>(pending: Promise<T>, signal: AbortSignal, onAbort: () => v
     });
 }
 
+/** Evi's errors for a plugin without a native module, and for a module without the method (Electron prefixes the second) */
+const lacksProtocol = (err: unknown) => /has no native (?:module|method)\b/.test(err instanceof Error ? err.message : String(err));
+
 export function createNativeClient(source: ClientSource) {
     const protocols = new WeakMap<object, Promise<number>>();
 
-    /** The native side's CALL_PROTOCOL, or 0 without one; asked once per run */
+    /**
+     * The native side's CALL_PROTOCOL, or 0 without one. A definite answer is kept for the run; a
+     * failure that says nothing about the module (a busy main, a native side mid-restart) is asked again
+     * on the next call, which meanwhile goes out as Evi passes it.
+     */
     function protocol(context: PluginContext<any>): Promise<number> {
         let known = protocols.get(context);
         if (!known) {
             let asked: Promise<unknown>;
             try {
                 asked = context.native.call(HIDDEN.protocol);
-            } catch {
+            } catch (err) {
                 // Evi throws synchronously for a plugin without a native module, and the real call will too
-                asked = Promise.resolve(0);
+                asked = Promise.reject(err);
             }
-            known = asked.then(answer => typeof answer === "number" ? answer : 0, () => 0);
-            protocols.set(context, known);
+            const answer = known = asked.then(value => typeof value === "number" ? value : 0, err => {
+                if (!lacksProtocol(err) && protocols.get(context) === answer) protocols.delete(context);
+                return 0;
+            });
+            protocols.set(context, answer);
         }
         return known;
     }

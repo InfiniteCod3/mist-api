@@ -6,6 +6,7 @@ import { access, stat } from "node:fs/promises";
 import { delimiter, extname, isAbsolute, join } from "node:path";
 
 import { NativeError } from "./errors.ts";
+import { atQuit } from "./quit.ts";
 
 export interface LifetimeOptions {
     /** How long a child process gets after SIGTERM before SIGKILL. Default 3000 */
@@ -41,11 +42,17 @@ export function killWithEscalation(child: ChildProcess, ms: number) {
 
 /**
  * A scope for one run of the native side: what it starts is cleaned up when the run stops, through
- * `ctx.onDispose`. Make one in `start`. Using it after the stop throws a NativeError "stopped".
+ * `ctx.onDispose`, and its child processes are also killed when Discord quits. Make one in `start`.
+ * Using it after the stop throws a NativeError "stopped".
  */
 export function lifetime(ctx: NativeContext, { killAfterMs = 3000 }: LifetimeOptions = {}): Lifetime {
     const controller = new AbortController();
     const cleanups = new Set<() => void>();
+    /** Evi doesn't stop native sides when Discord quits, so a child would outlive Discord */
+    const children = new Set<() => void>();
+    atQuit(ctx, () => {
+        for (const kill of children) kill();
+    });
     const live = () => {
         if (controller.signal.aborted) throw new NativeError("stopped", undefined, `${ctx.pluginId}'s native side stopped`);
     };
@@ -70,10 +77,15 @@ export function lifetime(ctx: NativeContext, { killAfterMs = 3000 }: LifetimeOpt
             live();
             const child = spawn(file, args, options);
             const stop = () => killWithEscalation(child, killAfterMs);
+            const forget = () => {
+                cleanups.delete(stop);
+                children.delete(stop);
+            };
             cleanups.add(stop);
-            child.once("exit", () => cleanups.delete(stop));
+            children.add(stop);
+            child.once("exit", forget);
             // Without a listener, a child that fails to start would throw in main
-            child.once("error", () => cleanups.delete(stop));
+            child.once("error", forget);
             return child;
         },
         interval(fn, ms) {

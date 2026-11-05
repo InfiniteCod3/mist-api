@@ -1,12 +1,15 @@
 /**
- * Holds requests a plugin makes through mist to the `permissions` in its manifest, by the rules Evi
- * holds the plugin's own fetch to. Evi can't see requests that go through Discord's own client, so
- * without this mist would be a way around a plugin's declaration.
+ * Holds what a plugin does through mist (Discord's API from /discord, message UI and send hooks from
+ * /ui) to the `permissions` in its manifest, by the rules Evi holds the plugin's own fetch and hooks
+ * to. Evi can't see what goes through Discord's own client or mist's patches, so without this mist
+ * would be a way around a plugin's declaration.
  *
  * The rules are copied from Evi's src/shared/declaredPermissions.ts (isHost, readPermissions,
  * hostAllowed, DISCORD_WRITES, apiPath, PluginPermissionError), because plugin code can't import
  * Evi's shared code. They must change when Evi's do.
  */
+import { REGISTRY } from "./registry.ts";
+
 export type PermissionFlag = "readMessages" | "sendMessages" | "changeSettings";
 export type PermissionKey = "network" | PermissionFlag;
 
@@ -83,7 +86,7 @@ export class UnknownPluginError extends Error {
     override name = "UnknownPluginError";
 
     constructor(readonly plugin: string) {
-        super(`${plugin} isn't a plugin Evi has loaded: pass discord() the plugin's own mist object or id`);
+        super(`${plugin} isn't a plugin Evi has loaded`);
     }
 }
 
@@ -112,4 +115,24 @@ export function checkApiRequest(plugin: string, method: string, path: string) {
 export function need(plugin: string, permission: PermissionFlag, target: string) {
     const declared = declaredBy(plugin);
     if (declared && !declared[permission]) throw new PluginPermissionError(plugin, permission, target);
+}
+
+const shown = (value: unknown) => value === null ? "null" : typeof value === "string" ? `the string ${JSON.stringify(value)}` : typeof value;
+
+/**
+ * The id of `mist`, which must be the plugin's own mist object: the one whose handle mist's page
+ * registry holds for that id. A string or a look-alike `{ id }` would let one plugin act under
+ * another's id and borrow its permissions.
+ */
+export function pluginOf(mist: unknown, usage: string): string {
+    const id = typeof mist === "object" && mist !== null ? (mist as { id?: unknown; }).id : undefined;
+    let owns = false;
+    if (typeof id === "string" && id) {
+        try {
+            const handle = (globalThis as Record<symbol, { get?(id: string): { owns?(value: unknown): boolean; } | undefined; } | undefined>)[REGISTRY]?.get?.(id);
+            owns = handle?.owns?.(mist) === true;
+        } catch { }
+    }
+    if (!owns) throw new TypeError(`${usage} takes the plugin's own mist object, from createMist, after mist.define; got ${shown(mist)}${typeof id === "string" ? ` with id ${JSON.stringify(id)}` : ""}`);
+    return id as string;
 }

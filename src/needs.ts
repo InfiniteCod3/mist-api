@@ -28,17 +28,33 @@ export function checkProvides(provides: Provides) {
     }
 }
 
+type PluginInfo = NonNullable<ReturnType<NonNullable<EviDebug["plugins"]>["get"]>>;
+
 /**
- * The needs that the installed plugins don't meet. A plugin that isn't installed, or that Evi hasn't
- * evaluated (it is turned off), isn't judged: until its code runs, it can't have said what it provides.
+ * Whether the plugin's switch is on and Evi hasn't pulled it, as Evi decides whether to run it
+ * (isPluginEnabled). An Evi whose settings can't be read is asked whether the plugin runs instead.
+ */
+function turnedOn(evi: EviDebug, id: string, info: PluginInfo): boolean {
+    const plugins = evi.settings?.data?.plugins;
+    if (!plugins || typeof plugins !== "object") return info.running === true;
+    return (plugins[id]?.enabled ?? info.manifest?.enabledByDefault ?? false) === true && !info.pulled;
+}
+
+/**
+ * The needs that the installed plugins don't meet. A plugin that isn't installed, is turned off, or
+ * that Evi hasn't evaluated isn't judged: it won't run, or hasn't said what it provides yet.
  */
 export function mismatches(needs: readonly Need[], evi: EviDebug | undefined, registry: Registry): Mismatch[] {
     const out: Mismatch[] = [];
     for (const need of needs) {
         let info;
-        try { info = evi?.plugins?.get(need.plugin); } catch { continue; }
-        // An Evi without `evaluated` only tells running plugins apart
-        if (!info || !(info.evaluated ?? info.running)) continue;
+        try {
+            info = evi?.plugins?.get(need.plugin);
+            // An Evi without `evaluated` only tells running plugins apart
+            if (!info || !(info.evaluated ?? info.running) || !turnedOn(evi!, need.plugin, info)) continue;
+        } catch {
+            continue;
+        }
         const handle = registry.get(need.plugin);
         let provided: number | undefined;
         try {

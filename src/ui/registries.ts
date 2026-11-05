@@ -4,7 +4,7 @@ import type { ComponentType, MouseEvent, ReactElement, ReactNode } from "react";
 import { onDemand } from "../patches.ts";
 import type { Channel, User } from "../stores.ts";
 import { Boundary, type Fallback } from "./boundary.ts";
-import { insertOnce, notify, type Owned, type Owner, owned, shared, uiRef } from "./shared.ts";
+import { entryOwner, insertOnce, type MistOwner, notify, type Owned, shared, uiRef } from "./shared.ts";
 
 /** A Discord message, typed only as far as UI entries use it */
 export interface Message {
@@ -60,9 +60,8 @@ function changed(state: ListState<any>) {
     notify(state.listeners);
 }
 
-function addEntry<P extends object>(state: ListState<P>, owner: Owner, id: string, Component: ComponentType<P>, fallback: Fallback | undefined) {
+function addEntry<P extends object>(state: ListState<P>, by: Owned, id: string, Component: ComponentType<P>, fallback: Fallback | undefined) {
     if (!id) throw new Error("mist ui: an entry needs an id");
-    const by = owned(owner);
     const entry: Entry<P> = { key: `${by.id}/${id}`, Component, owner: by, fallback };
     state.entries.set(entry.key, entry);
     changed(state);
@@ -161,8 +160,8 @@ export const chatBar = {
      * Adds a button to the chat bar, before the send button, while the plugin runs. `id` is unique
      * within the plugin; adding the same id again replaces the button.
      */
-    add(owner: Owner, id: string, Component: ComponentType<ChatBarProps>, options: EntryOptions = {}): () => void {
-        return addEntry(chatBarState(), owner, id, Component, "fallback" in options ? options.fallback : null);
+    add(mist: MistOwner, id: string, Component: ComponentType<ChatBarProps>, options: EntryOptions = {}): () => void {
+        return addEntry(chatBarState(), entryOwner(mist, "chatBar.add", false), id, Component, "fallback" in options ? options.fallback : null);
     },
 };
 
@@ -203,9 +202,12 @@ export const popover = {
             with: insertOnce(`${uiRef(POPOVER)}?.render(`, (_, [Button, channel, message]) => `${uiRef(POPOVER)}?.render(${Button},${channel},${message}),`),
         },
     })] as SourcePatch[],
-    /** Adds a button to the hover bar of every message while the plugin runs. Render `props.Button`. */
-    add(owner: Owner, id: string, Component: ComponentType<PopoverProps>, options: EntryOptions = {}): () => void {
-        return addEntry(popoverState(), owner, id, Component, "fallback" in options ? options.fallback : null);
+    /**
+     * Adds a button to the hover bar of every message while the plugin runs. Render `props.Button`.
+     * It sees each message, so the plugin's manifest must declare readMessages, or nothing.
+     */
+    add(mist: MistOwner, id: string, Component: ComponentType<PopoverProps>, options: EntryOptions = {}): () => void {
+        return addEntry(popoverState(), entryOwner(mist, "popover.add", true), id, Component, "fallback" in options ? options.fallback : null);
     },
 };
 
@@ -232,8 +234,11 @@ export const accessories = {
             with: insertOnce(`${uiRef(ACCESSORIES)}?.render(`, () => `,${uiRef(ACCESSORIES)}?.render(this.props)`),
         },
     })] as SourcePatch[],
-    /** Adds UI under every message while the plugin runs. Return null for messages it isn't for. */
-    add(owner: Owner, id: string, Component: ComponentType<AccessoryProps>, options: EntryOptions = {}): () => void {
-        return addEntry(accessoriesState(), owner, id, Component, options.fallback);
+    /**
+     * Adds UI under every message while the plugin runs. Return null for messages it isn't for. It
+     * sees each message, so the plugin's manifest must declare readMessages, or nothing.
+     */
+    add(mist: MistOwner, id: string, Component: ComponentType<AccessoryProps>, options: EntryOptions = {}): () => void {
+        return addEntry(accessoriesState(), entryOwner(mist, "accessories.add", true), id, Component, options.fallback);
     },
 };

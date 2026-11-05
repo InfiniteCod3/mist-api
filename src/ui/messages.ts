@@ -3,7 +3,7 @@ import type { SourcePatch } from "@evi/api";
 import { onDemand } from "../patches.ts";
 import type { Channel } from "../stores.ts";
 import type { Message } from "./registries.ts";
-import { insertOnce, logOnce, type Owned, type Owner, owned, shared, uiRef } from "./shared.ts";
+import { entryOwner, insertOnce, logOnce, type MistOwner, type Owned, shared, uiRef } from "./shared.ts";
 
 /** A message about to be sent. Change `content` to change what's sent. */
 export interface SendDraft {
@@ -42,12 +42,30 @@ interface OutgoingState {
 
 const OUTGOING = "outgoing";
 
-/** Listeners in key order, one at a time. A listener that throws is logged and skipped. */
+/** How long the message waits for one listener */
+const LISTENER_TIMEOUT_MS = 5000;
+
+const TIMED_OUT = Symbol("timed out");
+
+/** The listener's verdict, or TIMED_OUT once it has kept the message waiting LISTENER_TIMEOUT_MS */
+function settle(result: Verdict | Promise<Verdict>): Verdict | Promise<Verdict | typeof TIMED_OUT> {
+    if (typeof (result as { then?: unknown; } | undefined)?.then !== "function") return result as Verdict;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<typeof TIMED_OUT>(resolve => { timer = setTimeout(resolve, LISTENER_TIMEOUT_MS, TIMED_OUT); });
+    return Promise.race([result, late]).finally(() => clearTimeout(timer));
+}
+
+/** Listeners in key order, one at a time. A listener that throws or takes too long is logged and skipped. */
 async function run<D extends SendDraft>(hooks: Map<string, Hook<D>>, draft: D): Promise<boolean> {
     for (const hook of [...hooks.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) {
         const before = draft.content;
         try {
-            const verdict = await hook.listener(draft);
+            const verdict = await settle(hook.listener(draft));
+            if (verdict === TIMED_OUT) {
+                draft.content = before;
+                logOnce(hook.owner.log, `${hook.key} didn't finish within ${LISTENER_TIMEOUT_MS / 1000} s; the message goes on without it`, new Error("timed out"));
+                continue;
+            }
             if (typeof draft.content !== "string") {
                 draft.content = before;
                 logOnce(hook.owner.log, `${hook.key} set the message's content to something other than a string; keeping the content it had`, new TypeError(typeof draft.content));
@@ -69,9 +87,8 @@ const outgoing = () => shared<OutgoingState>(OUTGOING, () => {
     });
 }, s => s.send instanceof Map && s.edit instanceof Map);
 
-function addHook<D>(hooks: Map<string, Hook<D>>, owner: Owner, id: string, listener: Listener<D>) {
+function addHook<D>(hooks: Map<string, Hook<D>>, by: Owned, id: string, listener: Listener<D>) {
     if (!id) throw new Error("mist ui: a message hook needs an id");
-    const by = owned(owner);
     const hook: Hook<D> = { key: `${by.id}/${id}`, owner: by, listener };
     hooks.set(hook.key, hook);
     const remove = () => {
@@ -113,13 +130,14 @@ export const messages = {
     ] as SourcePatch[],
     /**
      * Runs `listener` before each message the user sends from the chat box, while the plugin runs.
-     * Listeners run one at a time in plugin and id order and may be async; the message waits for them.
+     * Listeners run one at a time in plugin and id order and may be async; the message waits up to
+     * 5 seconds for each. The plugin's manifest must declare readMessages, or nothing.
      */
-    beforeSend(owner: Owner, id: string, listener: Listener<SendDraft>): () => void {
-        return addHook(outgoing().send, owner, id, listener);
+    beforeSend(mist: MistOwner, id: string, listener: Listener<SendDraft>): () => void {
+        return addHook(outgoing().send, entryOwner(mist, "messages.beforeSend", true), id, listener);
     },
-    /** Runs `listener` before each edit the user saves, while the plugin runs */
-    beforeEdit(owner: Owner, id: string, listener: Listener<EditDraft>): () => void {
-        return addHook(outgoing().edit, owner, id, listener);
+    /** Runs `listener` before each edit the user saves, while the plugin runs. Held as beforeSend is. */
+    beforeEdit(mist: MistOwner, id: string, listener: Listener<EditDraft>): () => void {
+        return addHook(outgoing().edit, entryOwner(mist, "messages.beforeEdit", true), id, listener);
     },
 };

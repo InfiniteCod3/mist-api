@@ -46,7 +46,7 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | `filters.byStoreName(name)` | A filter that takes the store added under `name`. |
 | `waitFor(filter, callback)` | Calls back at once with a store the filter takes. Otherwise it calls back when `evi.addStore` adds one. Returns a function that stops the wait. |
 | `Dispatcher` | A `fakeDispatcher()`. |
-| `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed. |
+| `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed, and then it isn't enumerable, so spreading the module object leaves it out. |
 
 `evi` itself controls the fake:
 
@@ -163,3 +163,17 @@ const run = fakeContext({
 ```
 
 Evi's `PluginContext` is a class with private fields, so no other object matches its type. `fakeContext` casts its plain object to `PluginContext<S>`. A test that reads a member the fake doesn't have gets `undefined` at runtime, even though the type says it exists.
+
+### Testing discord() and the UI registries
+
+`discord(mist)` and the registries in `@aurologic/mist-api/ui` take only a `mist` that `mist.define` registered, and look the plugin up in `window.Evi.plugins` to read its manifest's `permissions`. A test starts the plugin with a fake context and puts a stand-in for `Evi.plugins` on `globalThis`:
+
+```ts
+(globalThis as any).Evi = { plugins: { get: (id: string) => id === "weather-demo" ? { manifest: { id, permissions: { readMessages: true } } } : undefined } };
+const definition = mist.define({});
+const run = fakeContext({ id: "weather-demo" });
+definition.start!(run.ctx);
+messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(); });
+```
+
+Leave out `permissions` for a plugin that declares none.

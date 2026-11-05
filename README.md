@@ -177,6 +177,13 @@ Run `bun run dev` in your Evi checkout and turn the plugin on. Evi's [plugin gui
 ```ts
 import { accounts, chat, discord, format } from "@aurologic/mist-api/discord";
 
+export default mist.define({
+	start(ctx) {
+		ctx.onDispose(accounts.on("connected", ({ id }) => mist.log.info(`connected as ${id}`)));
+	},
+});
+
+// After mist.define, which registers the mist object that discord() checks
 const api = discord(mist);
 
 export async function showRecent(channelId: string) {
@@ -187,15 +194,9 @@ export async function showRecent(channelId: string) {
 	chat.localMessage(`Read ${lines.length} messages.`, channelId);
 	return lines;
 }
-
-export default mist.define({
-	start(ctx) {
-		ctx.onDispose(accounts.on("connected", ({ id }) => mist.log.info(`connected as ${id}`)));
-	},
-});
 ```
 
-Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. `discord(mist)` holds the plugin's requests to its declaration, by the same rules Evi applies to its `fetch`. [Discord](docs/discord.md) lists what each part needs.
+Reading messages through Discord's API needs `"network": ["discord.com"]` and `"readMessages": true` in the manifest's `permissions`. `discord(mist)` holds the plugin's requests to its declaration, by the same rules Evi applies to its `fetch`. It takes only the plugin's own `mist`, after `mist.define`, so one plugin can't use another's permissions by naming its id. [Discord](docs/discord.md) lists what each part needs.
 
 ## Add UI to Discord's
 
@@ -217,7 +218,7 @@ export default mist.define({
 });
 ```
 
-The registries need Discord code that mist-api patches, so spread their `patches` into the plugin's own. [UI](docs/ui.md) covers each part.
+The registries need Discord code that mist-api patches, so spread their `patches` into the plugin's own. They take only the plugin's own `mist`. The hover bar, the UI under messages, and the send and edit listeners see message content, so they need `"readMessages": true` in the manifest's `permissions`, or no `permissions` at all, as Evi asks of a plugin that hooks sending. [UI](docs/ui.md) covers each part.
 
 ## Debug a plugin over CDP
 

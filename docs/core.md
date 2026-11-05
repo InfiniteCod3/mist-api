@@ -323,7 +323,7 @@ A key-value store for the plugin, kept in the page's IndexedDB between runs and 
 - Each plugin id has its own database, named `mist-api:<id>`. It never opens the `evi-<id>` database that Evi's plugin guide suggests, so a plugin that already keeps one doesn't clash with it.
 - Values are stored as JSON text, so `JSON.stringify`'s rules apply: a `Date` comes back as its ISO string, and a key whose value is `undefined` is dropped. `set` of a value that JSON can't write, such as a `BigInt` or a cycle, rejects with `JSON.stringify`'s error and stores nothing. Each `get` returns a new copy.
 - `get` returns `unknown` because the stored data is outside the type system: an older version of the plugin may have written it. Check it before use, as with `fetchJson`.
-- `update` reads the value, calls `fn` with it, and writes what `fn` returns, in one transaction. Two updates of a key at the same time run one after the other, so neither loses the other's write. `fn` must be synchronous, because IndexedDB ends the transaction at the first `await`. If `fn` returns `undefined`, the key is deleted. If `fn` throws, nothing changes and `update` rejects with that error. `update` resolves to the stored value.
+- `update` reads the value, calls `fn` with it, and writes what `fn` returns, in one transaction. Two updates of a key at the same time run one after the other, so neither loses the other's write. `fn` must be synchronous, because IndexedDB ends the transaction at the first `await`. An `fn` that returns a promise makes `update` reject with a `TypeError`, and nothing is stored. If `fn` returns `undefined`, the key is deleted. If `fn` throws, nothing changes and `update` rejects with that error. `update` resolves to the stored value.
 - Every error rejects the call's promise. Where IndexedDB is missing, or throws when it is opened, each call rejects with `IndexedDB isn't available on this page, so mist-api:<id> can't be opened` or IndexedDB's own error. The next call tries again.
 - If another page deletes or upgrades the database, mist closes its connection so that it isn't blocked, and opens the database again on the next call.
 
@@ -571,6 +571,7 @@ interface MistHandle {
 	values(): Record<string, Reduced>;
 	settings(): Record<string, Reduced> | null;
 	call(method: string, ...args: unknown[]): Promise<never>;
+	owns?(value: unknown): boolean;
 }
 
 interface HandleState {
@@ -588,6 +589,8 @@ interface HandleState {
 ```
 
 `provides` is the plugin's `provides` option. `warnings` lists what the plugin got wrong in the current run: a [store read too early](#stores-read-too-early), a [needed plugin at another version](#plugins-that-depend-on-each-other), a [settings migration](#settings-migrations) that threw, or a [`$self` name](#self-names) that the definition lacks. Both are absent from handles made by copies of 0.2.1 and earlier. Warnings aren't registry concerns: they don't make `mist call` refuse.
+
+`owns(value)` is `true` only for the plugin's own `Mist` object, the one `createMist` made with this handle. `discord()` and the UI registries use it to check that the object they get is the plugin's own. It reveals nothing and calls nothing. Handles made by copies of 0.2.1 and earlier don't have it, so their `mist` can't own a registry entry or a `discord()` client.
 
 `HandleState.native` is `"unknown"` until the plugin first starts. Then it is `"none"` for a plugin without a native module, `"plain"` for a native module not made with `defineNative`, and `"mist"` for one made with `defineNative`. `errors` counts the failed calls and the `error` lines still kept in the page side's rings. `quiet` counts the calls of each `quiet` method.
 

@@ -1,7 +1,7 @@
 import { find } from "@evi/api";
 
+import { checkApiRequest, need } from "../permissions.ts";
 import { isRecord, sleep } from "../util.ts";
-import { checkApiRequest, need } from "./permissions.ts";
 
 type Method = "get" | "post" | "put" | "patch" | "del";
 
@@ -151,7 +151,7 @@ const byId = (a: { id: string; }, b: { id: string; }) => {
 };
 
 export type MessagesOptions = ({ before?: string; after?: undefined; } | { after: string; before?: undefined; }) & {
-    /** How many messages in all. Default: every one there is. */
+    /** How many messages in all: a finite count from 0. Default: every one there is. */
     limit?: number;
     signal?: AbortSignal;
 };
@@ -175,17 +175,24 @@ async function page(plugin: string, channelId: string, query: Record<string, str
 
 /**
  * The channel's messages, a page at a time. Newest first from the latest, or from before `before`;
- * oldest first from after `after`. A 429 waits as long as Discord says, then asks again.
+ * oldest first from after `after`. A 429 waits as long as Discord says, then asks again. Bad
+ * arguments and a missing permission throw here, not at the first `next()`.
  */
-export async function* messages(plugin: string, channelId: string, options: MessagesOptions = {}): AsyncGenerator<ApiMessage, void, undefined> {
+export function messages(plugin: string, channelId: string, options: MessagesOptions = {}): AsyncGenerator<ApiMessage, void, undefined> {
     if (!isSnowflake(channelId)) throw new TypeError(`A channel id is a Discord id, got ${JSON.stringify(channelId)}`);
-    need(plugin, "readMessages", `/channels/${channelId}/messages`);
-    const { before, after, signal, limit = Infinity } = options;
+    const { before, after, signal, limit } = options;
     if (before !== undefined && after !== undefined) throw new TypeError("Page from before or from after, not both");
     const forward = after !== undefined;
-    let cursor = forward ? after : before;
+    const cursor = forward ? after : before;
     if (cursor !== undefined && !isSnowflake(cursor)) throw new TypeError(`A message id is a Discord id, got ${JSON.stringify(cursor)}`);
-    let left = Math.max(0, Math.floor(limit));
+    if (limit !== undefined && (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0)) throw new TypeError(`limit is a finite count of messages from 0, or left out for all of them; got ${String(limit)}`);
+    need(plugin, "readMessages", `/channels/${channelId}/messages`);
+    return pages(plugin, channelId, forward, cursor, limit === undefined ? Infinity : Math.floor(limit), signal);
+}
+
+async function* pages(plugin: string, channelId: string, forward: boolean, from: string | undefined, limit: number, signal: AbortSignal | undefined): AsyncGenerator<ApiMessage, void, undefined> {
+    let cursor = from;
+    let left = limit;
     while (left > 0) {
         signal?.throwIfAborted();
         const size = Math.min(PAGE, left);

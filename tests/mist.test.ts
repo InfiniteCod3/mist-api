@@ -187,3 +187,34 @@ test("a fallback function that throws too is logged, and the wrapper still doesn
     expect(both(1)).toBeUndefined();
     expect(errors()).toEqual([expect.stringContaining("threw; returning its fallback"), expect.stringContaining("fallback threw")]);
 });
+
+/** A native side whose __mist_protocol answers with each of `answers` in turn, the last one from then on */
+function probed(answers: (number | Error)[]) {
+    const seen = { probes: 0, marked: [] as boolean[] };
+    const native = async (method: string, ...args: unknown[]) => {
+        if (method === "__mist_debugAllowed") return false;
+        if (method === "__mist_protocol") {
+            const answer = answers[Math.min(seen.probes++, answers.length - 1)];
+            if (answer instanceof Error) throw answer;
+            return answer;
+        }
+        const mark = (args.at(-1) as { __mist_call?: number; } | undefined)?.__mist_call === 1;
+        seen.marked.push(mark);
+        return mark ? { __mist_answer: 1, ok: true, value: 5 } : 5;
+    };
+    return { seen, native };
+}
+
+test("a protocol probe that fails for no known reason is asked again at the next call; a definite answer is kept for the run", async () => {
+    const busy = probed([new Error("Error invoking remote method 'evi:plugin-native-call': Error: main is busy"), 1]);
+    const mist = createMist<{}, Native>("t-probe-busy");
+    mist.define({}).start!(fakeContext({ native: busy.native }).ctx);
+    for (let i = 0; i < 3; i++) expect(await mist.native.add(2, 3)).toBe(5);
+    expect(busy.seen).toEqual({ probes: 2, marked: [false, true, true] });
+
+    const plain = probed([new Error("Error invoking remote method 'evi:plugin-native-call': Error: Plugin t-probe-plain has no native method __mist_protocol")]);
+    const other = createMist<{}, Native>("t-probe-plain");
+    other.define({}).start!(fakeContext({ native: plain.native }).ctx);
+    for (let i = 0; i < 3; i++) expect(await other.native.add(2, 3)).toBe(5);
+    expect(plain.seen).toEqual({ probes: 1, marked: [false, false, false] });
+});

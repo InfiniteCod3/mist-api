@@ -190,7 +190,7 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
         report: reportEvents,
     });
 
-    const debug = createDebug({ id, recorder, exposed, context: () => current, startedAt: () => startedAt, callNative, provides, warnings: () => [...warnings.values()] });
+    const debug = createDebug({ id, recorder, exposed, context: () => current, startedAt: () => startedAt, callNative, provides, warnings: () => [...warnings.values()], owns: value => value === mist });
     const registered = registry();
 
     function storeMissed(store: string) {
@@ -247,7 +247,7 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
         } catch { }
     }
 
-    return {
+    const mist: Mist<S, N> = {
         id,
         get ctx() { return ctx(); },
         get running() { return !!current; },
@@ -360,4 +360,5 @@ export function createMist<S extends SettingsSchema = {}, N = {}>(id: string, op
             };
         } as Mist<S, N>["safe"],
     };
+    return mist;
 }

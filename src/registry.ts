@@ -7,7 +7,7 @@ import type { CallRecord, LogRecord, ReducedNativeLogs } from "./protocol.ts";
 import type { Reduced } from "./values.ts";
 
 // A protocol name, not the package name: copies published under another name must still meet here
-const REGISTRY = Symbol.for("mist-api.registry.v1");
+export const REGISTRY = Symbol.for("mist-api.registry.v1");
 
 /** What the plugin's native side turned out to be */
 export type NativeKind = "unknown" | "none" | "plain" | "mist";
@@ -51,6 +51,11 @@ export interface MistHandle {
     settings(): Record<string, Reduced> | null;
     /** Always refuses: calls go through the capability, which a debugger reads from the handle's private field */
     call(method: string, ...args: unknown[]): Promise<never>;
+    /**
+     * Whether `value` is the plugin's own mist object. How `discord()` and the UI registries tell the
+     * plugin from code that only names its id. Copies of 0.2.1 and earlier have none.
+     */
+    owns?(value: unknown): boolean;
 }
 
 /** How a plugin id's handle changed hands in this page's registry */
@@ -89,9 +94,11 @@ export interface EviDebug {
     diagnosePatches?(): PatchDiagnosis[];
     diagnoseLookups?(plugin?: string): LookupDiagnosis[];
     plugins?: {
-        get(id: string): { running?: boolean; error?: string; evaluated?: boolean; manifest?: { name?: string; version?: string; }; } | undefined;
+        get(id: string): { running?: boolean; error?: string; evaluated?: boolean; pulled?: unknown; manifest?: { name?: string; version?: string; enabledByDefault?: boolean; }; } | undefined;
         subscribe?(listener: () => void): () => void;
     };
+    /** Evi's settings: each plugin's switch is `data.plugins[id].enabled` */
+    settings?: { readonly data?: { plugins?: Record<string, { enabled?: boolean; } | undefined>; }; };
 }
 
 export const eviOf = (root: object = globalThis) => (root as { Evi?: EviDebug; }).Evi;

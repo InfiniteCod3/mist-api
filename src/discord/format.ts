@@ -85,8 +85,14 @@ export const format = {
         const relative = keep("relative", {}, tag => new Intl.RelativeTimeFormat(tag, { numeric: "auto" }));
         const seconds = (time(at) - now) / 1000;
         if (!Number.isFinite(seconds)) return String(new Date(NaN));
-        for (const [unit, size] of RELATIVE_UNITS) {
-            if (Math.abs(seconds) >= size) return relative.format(Math.round(seconds / size), unit);
+        const abs = Math.abs(seconds);
+        const count = (size: number) => Math.sign(seconds) * Math.round(abs / size);
+        for (const [i, [unit, size]] of RELATIVE_UNITS.entries()) {
+            if (abs < size) continue;
+            // Rounded up to a whole larger unit, it reads as that unit: 59m50s is "1 hour ago", not "60 minutes ago"
+            const larger = RELATIVE_UNITS[i - 1];
+            if (larger && Math.round(abs / size) * size >= larger[1]) return relative.format(count(larger[1]), larger[0]);
+            return relative.format(count(size), unit);
         }
         return relative.format(0, "second");
     },

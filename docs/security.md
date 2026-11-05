@@ -93,6 +93,23 @@ Evi passes each native call with data from Discord's page, and the page is share
 - Path grants keep page input from naming paths. `pathGrants` gives the page an opaque handle for a path the user picked in a dialog that main shows. Only native code turns a handle into a path, and a folder's handle reaches only paths inside that folder. Code that reaches the plugin's page side can use the handles that the page side has, but it can't make one for a path nobody picked. `resolveGrant` checks path text and doesn't resolve links.
 - Secrets stay in main. `secrets` encrypts with `safeStorage` into the plugin's own folder. That protects a copied file, not a running Discord: every native module can call `safeStorage` and read the file. `encrypted` is `false` when Electron falls back to Chromium's built-in key on Linux. A native method that returns a secret to the page hands it to every plugin there.
 
+## Permissions through mist
+
+Evi holds a plugin to the `permissions` in its manifest only where Evi can see which plugin is asking: the plugin's own `fetch`, its context, and its copy of `@evi/api`. Requests through Discord's own API client and listeners in mist's UI patches go around that, so mist holds them to the same declaration, by the rules of Evi's guard (`src/renderer/plugins/guard.ts`):
+
+- `discord(mist)` holds `rest` and `messages` to `network` and the message and settings flags, as [Discord](discord.md#permissions) describes.
+- `popover.add`, `accessories.add`, `messages.beforeSend`, and `messages.beforeEdit` hand the plugin each message's content, and the last two let it rewrite or cancel what the user sends or saves. Each needs `readMessages`, as Evi's guard asks of a hook on sending and editing. They throw a `PluginPermissionError` before anything is registered.
+- A plugin whose manifest declares no `permissions` isn't held to anything, as in Evi. An id that Evi has no loaded plugin by throws an `UnknownPluginError`, so a made-up id doesn't count as a plugin that declares nothing.
+
+To know which plugin asks, these functions take the plugin's own mist object and nothing else. They check it at runtime: the handle that the page registry holds for the object's id must answer `owns(object)` with `true`. Only the handle that `createMist` made answers so, for the one object it made. A string id, or an object that only carries another plugin's `id`, throws a `TypeError`, so a plugin can't name another plugin and borrow its permissions. The UI registries don't take Evi's `ctx`, because nothing on the page can tell one plugin's context from another's: `Evi.plugins` never shows a context.
+
+This is the same kind of check as Evi's guard. It isn't a sandbox:
+
+- Page code shares one JavaScript realm with Discord and every plugin. Code that ignores mist can read the registries' state on `globalThis` under their `Symbol.for("mist-api.ui/…")` keys, add a listener to them directly, or patch Discord's send function itself.
+- A stopped plugin's handle can be replaced, as [What page code can still do](#what-page-code-can-still-do) describes, and a plugin that doesn't use `mist.define` has no handle. A stand-in handle whose `owns` says yes passes the owner check for that id.
+
+What these checks catch is what an honest plugin forgot to declare. Evi's store review reads the code and compares the declaration with what it does.
+
 ## What this doesn't protect
 
 The design keeps other plugins away from a plugin's capability and native side. It doesn't make the page a trusted place. These limits follow from the code:
@@ -102,6 +119,7 @@ The design keeps other plugins away from a plugin's capability and native side. 
 - A plugin that loads first can install a lying registry. The registry key is a `Symbol.for` key on `globalThis`, and the first copy to set it wins. A malicious plugin that sets it first, or that defines `window.Mist` first, can misreport the other plugins' handles to the CLI. It can't use that to reach another plugin's capability or native side, because each handle is made by the plugin's own copy and the capability is still only in that plugin's closure and its handle's private field.
 - A stopped plugin's handle can be replaced, as [What page code can still do](#what-page-code-can-still-do) describes.
 - Native modules share main. Every plugin's native side runs in Discord's main process with full access, so another plugin's native code can reach this plugin's native module and call any of its hidden `__mist_` methods itself, answer its requests, or read its `plugin-data` folder, its grants, and its secrets.
+- `mist flux` keeps the actions it watches on `globalThis`, under `Symbol.for("mist-cli.flux")`, until the CLI reads them, at most 250 ms later, or the watch ends. While it runs, any plugin can read them there, including the text of messages in `MESSAGE_CREATE` actions. Only the fields named like secrets are masked.
 - Anyone with the debugging port has everything. The port gives full control of Discord, including the account's token. That is why the gate opens on it, and why Discord should run without it when you aren't debugging.
 
 ## The debug report

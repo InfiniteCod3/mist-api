@@ -41,6 +41,8 @@ export interface DebugSource {
     callNative(method: string, args: unknown[]): Promise<unknown>;
     provides: Readonly<Record<string, number>>;
     warnings(): string[];
+    /** Whether `value` is the plugin's mist object */
+    owns(value: unknown): boolean;
 }
 
 export interface Debug {
@@ -166,6 +168,7 @@ export function createDebug(source: DebugSource): Debug {
         values: () => values(false),
         settings: () => settings(false),
         call: (method: string) => Promise.reject(new Error(`Calling ${id}.${method} goes through its debug capability, which only CDP reaches: run \`mist call ${id} ${method}\``)),
+        owns: (value: unknown) => source.owns(value),
     }));
 
     return { handle, capability, probe };

@@ -98,6 +98,29 @@ test("a needed plugin that isn't installed, or that Evi hasn't evaluated because
     expect(run.toasts).toEqual([]);
 });
 
+test("a needed plugin that is turned off isn't judged even after Evi evaluated it, and is once it is turned on", () => {
+    const { changed } = fakeEvi({ "t-feed-was-on": { name: "Was on" }, "t-feed-default": { name: "Default" } });
+    const evi = (globalThis as any).Evi;
+    const switches: Record<string, { enabled?: boolean; }> = { "t-feed-was-on": { enabled: false } };
+    evi.settings = { data: { plugins: switches } };
+    const get = evi.plugins.get;
+    evi.plugins.get = (id: string) => {
+        const info = get(id);
+        return info && { ...info, running: switches[id]?.enabled === true, manifest: { ...info.manifest, enabledByDefault: id === "t-feed-default" } };
+    };
+    const run = fakeContext({ native: mistNative(false), id: "t-needs-off" });
+    createMist("t-needs-off", {
+        needs: [{ plugin: "t-feed-was-on", protocol: "a", version: 1 }, { plugin: "t-feed-default", protocol: "b", version: 1 }],
+    }).define({}).start!(run.ctx);
+    // On by default, and nobody turned it off: judged, though it isn't running yet
+    expect(warnings("t-needs-off")).toEqual(["Default (t-feed-default) doesn't say it provides b, and t-needs-off speaks version 1: update Default"]);
+
+    switches["t-feed-was-on"].enabled = true;
+    changed();
+    expect(warnings("t-needs-off")).toHaveLength(2);
+    run.dispose();
+});
+
 test("the handle and its state advertise what the plugin provides, and a bad version is refused", () => {
     createMist("t-provides", { provides: { "weather-feed": 2 } }).define({});
     const handle = (globalThis as any).Mist.get("t-provides");

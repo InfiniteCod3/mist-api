@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, jest, mock, test } from "bun:test";
 import { join } from "node:path";
 import * as React from "react";
 import * as runtime from "react/jsx-runtime";
@@ -53,6 +53,23 @@ function text(root: ReactTestRenderer): string {
 }
 
 const errors = (run: ReturnType<typeof fakeContext>) => run.logs.filter(l => l.level === "error");
+
+/** Evi's plugins, by id: each one's manifest permissions, undefined for one that declares none */
+const declared: Record<string, unknown> = {};
+const page = globalThis as { Evi?: unknown; };
+const eviBefore = page.Evi;
+page.Evi = { plugins: { get: (id: string) => id in declared ? { manifest: { id, permissions: declared[id] } } : undefined } };
+afterAll(() => void (page.Evi = eviBefore));
+
+/** A running plugin that Evi has loaded: its mist, defined and started, and the fake context it runs in */
+function plugin(id: string, permissions?: Record<string, unknown>) {
+    declared[id] = permissions;
+    const mist = createMist(id);
+    const definition = mist.define({});
+    const run = fakeContext({ id });
+    definition.start!(run.ctx);
+    return { mist, run };
+}
 
 test("Boundary shows a notice with Retry instead of a child that throws, logs once, and renders the child again on retry", () => {
     const run = fakeContext({ id: "t-boundary" });
@@ -168,27 +185,27 @@ test("chat bar buttons render in Discord's chat bar before the send button, sort
     expect(code.match(/\?\.inject\(\$,arguments\[0\]\)/g)).toHaveLength(1);
     const ChatBar = load(code, { jsx }).A;
 
-    const b = fakeContext({ id: "t-chat-b" });
-    const a = fakeContext({ id: "t-chat-a" });
-    ui.chatBar.add(b.ctx, "timer", ({ channel }) => h("timer", { channel: channel.id }));
-    other.chatBar.add(a.ctx, "poll", () => h("poll"));
+    const b = plugin("t-chat-b");
+    const a = plugin("t-chat-a");
+    ui.chatBar.add(b.mist, "timer", ({ channel }) => h("timer", { channel: channel.id }));
+    other.chatBar.add(a.mist, "poll", () => h("poll"));
     const root = render(h(ChatBar, { channel: { id: "42" }, type: { analyticsName: "normal" } }));
     const types = () => (root.toJSON() as { children: { type: string; }[]; }).children.map(c => c.type);
     expect(types()).toEqual(["app-launcher", "poll", "timer", "send"]);
     expect(root.root.findByType("timer" as never).props.channel).toBe("42");
 
-    act(() => a.dispose());
+    act(() => a.run.dispose());
     act(() => root.update(h(ChatBar, { channel: { id: "42" } })));
     expect(types()).toEqual(["app-launcher", "timer", "send"]);
-    act(() => b.dispose());
+    act(() => b.run.dispose());
     expect(types()).toEqual(["app-launcher", "send"]);
 });
 
 test("a chat bar button that throws renders nothing, logs to its plugin, and leaves the other buttons", () => {
     const ChatBar = load(patch(chatBarModule, ui.chatBar.patches), { jsx }).A;
-    const run = fakeContext({ id: "t-chat-broken" });
-    ui.chatBar.add(run.ctx, "a-broken", () => { throw new Error("broken button"); });
-    ui.chatBar.add(run.ctx, "b-fine", () => h("fine"));
+    const { mist, run } = plugin("t-chat-broken");
+    ui.chatBar.add(mist, "a-broken", () => { throw new Error("broken button"); });
+    ui.chatBar.add(mist, "b-fine", () => h("fine"));
     const root = quietly(() => render(h(ChatBar, { channel: { id: "1" } })));
     expect((root.toJSON() as { children: { type: string; }[]; }).children.map(c => c.type)).toEqual(["app-launcher", "fine", "send"]);
     expect(errors(run)[0].args[0]).toBe("t-chat-broken/a-broken threw while rendering; showing its fallback");
@@ -197,9 +214,9 @@ test("a chat bar button that throws renders nothing, logs to its plugin, and lea
 
 test("adding a chat bar button with an id the plugin already used replaces it, and the old remove leaves the new one", () => {
     const ChatBar = load(patch(chatBarModule, ui.chatBar.patches), { jsx }).A;
-    const run = fakeContext({ id: "t-chat-replace" });
-    const removeOld = ui.chatBar.add(run.ctx, "b", () => h("old"));
-    ui.chatBar.add(run.ctx, "b", () => h("new"));
+    const { mist, run } = plugin("t-chat-replace");
+    const removeOld = ui.chatBar.add(mist, "b", () => h("old"));
+    ui.chatBar.add(mist, "b", () => h("new"));
     removeOld();
     const root = render(h(ChatBar, { channel: { id: "1" } }));
     expect((root.toJSON() as { children: { type: string; }[]; }).children.map(c => c.type)).toEqual(["app-launcher", "new", "send"]);
@@ -211,9 +228,9 @@ test("hover bar buttons render after the Shift-only buttons with Discord's butto
         return h("button", { "aria-label": label });
     }
     const HoverBar = load(patch(patch(popoverModule, ui.popover.patches), other.popover.patches), { jsx, Button }).A;
-    const run = fakeContext({ id: "t-popover" });
+    const { mist, run } = plugin("t-popover");
     const seen: string[] = [];
-    ui.popover.add(run.ctx, "translate", ({ Button: B, channel, message }) => {
+    ui.popover.add(mist, "translate", ({ Button: B, channel, message }) => {
         seen.push(`${channel.id}/${message.id}`);
         return h(B, { label: "Translate", icon: () => null, onClick() { } });
     });
@@ -226,9 +243,9 @@ test("hover bar buttons render after the Shift-only buttons with Discord's butto
 
 test("accessories render under the message with its props, and one that throws shows the notice in its place", () => {
     const Accessories = load(patch(patch(accessoriesModule, ui.accessories.patches), other.accessories.patches), { jsx, React }).Ay;
-    const run = fakeContext({ id: "t-accessories" });
-    ui.accessories.add(run.ctx, "a-summary", ({ message, channel }) => h("p", null, `${channel.id}: ${message.content}`));
-    ui.accessories.add(run.ctx, "b-broken", () => { throw new Error("broken accessory"); });
+    const { mist, run } = plugin("t-accessories");
+    ui.accessories.add(mist, "a-summary", ({ message, channel }) => h("p", null, `${channel.id}: ${message.content}`));
+    ui.accessories.add(mist, "b-broken", () => { throw new Error("broken accessory"); });
     const root = quietly(() => render(h(Accessories, { message: { id: "m", content: "hi" }, channel: { id: "c" } })));
     expect(text(root)).toBe("(edited)c: hit-accessories/b-broken couldn't be shown.Retry");
     act(() => run.dispose());
@@ -246,11 +263,11 @@ function sendFixture(failureReason?: string) {
 
 test("send listeners run in plugin and id order, may be async, change the content, and see the channel", async () => {
     const { sent, go } = sendFixture();
-    const a = fakeContext({ id: "t-send-a" });
-    const b = fakeContext({ id: "t-send-b" });
+    const a = plugin("t-send-a");
+    const b = plugin("t-send-b");
     const order: string[] = [];
-    other.messages.beforeSend(b.ctx, "shout", draft => { order.push("b/shout"); draft.content = draft.content.toUpperCase(); });
-    ui.messages.beforeSend(a.ctx, "trim", async draft => {
+    other.messages.beforeSend(b.mist, "shout", draft => { order.push("b/shout"); draft.content = draft.content.toUpperCase(); });
+    ui.messages.beforeSend(a.mist, "trim", async draft => {
         order.push(`a/trim in ${draft.channel.id}`);
         await new Promise(r => setTimeout(r, 5));
         draft.content = draft.content.trim();
@@ -258,18 +275,18 @@ test("send listeners run in plugin and id order, may be async, change the conten
     expect(await go("  hi  ")).toEqual({ shouldClear: true, shouldRefocus: true });
     expect(sent).toEqual(["HI"]);
     expect(order).toEqual(["a/trim in c", "b/shout"]);
-    a.dispose();
-    b.dispose();
+    a.run.dispose();
+    b.run.dispose();
     await go(" plain ");
     expect(sent.at(-1)).toBe(" plain ");
 });
 
 test("a send listener that cancels keeps the message in the box, and later listeners don't run", async () => {
     const { sent, go } = sendFixture();
-    const run = fakeContext({ id: "t-send-cancel" });
+    const { mist, run } = plugin("t-send-cancel");
     let later = false;
-    ui.messages.beforeSend(run.ctx, "a-block", draft => ({ cancel: draft.content.includes("password") }));
-    ui.messages.beforeSend(run.ctx, "b-later", () => void (later = true));
+    ui.messages.beforeSend(mist, "a-block", draft => ({ cancel: draft.content.includes("password") }));
+    ui.messages.beforeSend(mist, "b-later", () => void (later = true));
     expect(await go("my password")).toEqual({ shouldClear: false, shouldRefocus: true });
     expect(sent).toEqual([]);
     expect(later).toBe(false);
@@ -280,9 +297,9 @@ test("a send listener that cancels keeps the message in the box, and later liste
 
 test("a send listener that throws or sets a non-string content is logged once, and the message goes on as it was", async () => {
     const { sent, go } = sendFixture();
-    const run = fakeContext({ id: "t-send-throws" });
-    ui.messages.beforeSend(run.ctx, "a-throws", draft => { draft.content = "lost"; throw new Error("listener broke"); });
-    ui.messages.beforeSend(run.ctx, "b-number", draft => { (draft as { content: unknown; }).content = 42; });
+    const { mist, run } = plugin("t-send-throws");
+    ui.messages.beforeSend(mist, "a-throws", draft => { draft.content = "lost"; throw new Error("listener broke"); });
+    ui.messages.beforeSend(mist, "b-number", draft => { (draft as { content: unknown; }).content = 42; });
     await go("one");
     await go("two");
     expect(sent).toEqual(["lost", "lost"]);
@@ -295,9 +312,9 @@ test("a send listener that throws or sets a non-string content is logged once, a
 
 test("send listeners don't run for a message Discord turned down", async () => {
     const { sent, go } = sendFixture("slowmode");
-    const run = fakeContext({ id: "t-send-invalid" });
+    const { mist, run } = plugin("t-send-invalid");
     let ran = false;
-    ui.messages.beforeSend(run.ctx, "x", () => void (ran = true));
+    ui.messages.beforeSend(mist, "x", () => void (ran = true));
     expect(await go("hi")).toEqual({ shouldClear: false, shouldRefocus: true });
     expect(ran).toBe(false);
     expect(sent).toEqual([]);
@@ -308,9 +325,9 @@ test("edit listeners see the message, change what's saved, and can cancel the ed
     const saved: string[] = [];
     const { edit } = load(patch(editModule, [ui.messages.patches[1]]), { saved: (_c: string, _m: string, content: string) => void saved.push(content) });
     const go = (content: string) => edit(content, { id: "c" }, { id: "m", content: "old" }, async () => ({ valid: true })) as Promise<{ shouldClear: boolean; shouldRefocus: boolean; }>;
-    const run = fakeContext({ id: "t-edit" });
-    ui.messages.beforeEdit(run.ctx, "sign", draft => { draft.content = `${draft.content} (from ${draft.message.id})`; });
-    ui.messages.beforeEdit(run.ctx, "veto", draft => draft.content.startsWith("no") ? { cancel: true } : undefined);
+    const { mist, run } = plugin("t-edit");
+    ui.messages.beforeEdit(mist, "sign", draft => { draft.content = `${draft.content} (from ${draft.message.id})`; });
+    ui.messages.beforeEdit(mist, "veto", draft => draft.content.startsWith("no") ? { cancel: true } : undefined);
     expect(await go("new")).toEqual({ shouldClear: true, shouldRefocus: true });
     expect(await go("nope")).toEqual({ shouldClear: false, shouldRefocus: true });
     expect(saved).toEqual(["new (from m)"]);
@@ -331,4 +348,77 @@ test("adding UI to a mist whose plugin isn't running throws", () => {
     const mist = createMist("t-ui-stopped");
     mist.define({});
     expect(() => ui.chatBar.add(mist, "x", () => null)).toThrow();
+});
+
+test("hooks that see message content need readMessages in a manifest that declares permissions, and nothing is added without it", async () => {
+    const { sent, go } = sendFixture();
+    const { mist, run } = plugin("t-gate-undeclared", { network: ["example.com"] });
+    const refused = (add: () => unknown) => {
+        try {
+            add();
+        } catch (err) {
+            return err;
+        }
+    };
+    const usages = {
+        "popover.add": () => ui.popover.add(mist, "x", () => null),
+        "accessories.add": () => other.accessories.add(mist, "x", () => null),
+        "messages.beforeSend": () => ui.messages.beforeSend(mist, "x", draft => { draft.content = "rewritten"; }),
+        "messages.beforeEdit": () => ui.messages.beforeEdit(mist, "x", () => ({ cancel: true })),
+    };
+    for (const [usage, add] of Object.entries(usages)) {
+        expect(refused(add)).toMatchObject({ name: "PluginPermissionError", plugin: "t-gate-undeclared", permission: "readMessages", message: `t-gate-undeclared can't read messages (${usage}): its manifest doesn't declare permissions.readMessages` });
+    }
+    await go("hello");
+    expect(sent).toEqual(["hello"]);
+    // The chat bar hands no message, so it needs nothing
+    expect(() => ui.chatBar.add(mist, "button", () => null)).not.toThrow();
+
+    const reader = plugin("t-gate-reader", { readMessages: true });
+    ui.messages.beforeSend(reader.mist, "x", draft => { draft.content = "rewritten"; });
+    await go("hello");
+    expect(sent.at(-1)).toBe("rewritten");
+    act(() => { run.dispose(); reader.run.dispose(); });
+});
+
+test("a registry takes only the plugin's own mist object, so one plugin can't add under another's id", () => {
+    const victim = plugin("t-owner-victim");
+    const forged = { id: "t-owner-victim", ctx: victim.run.ctx, log: victim.mist.log };
+    for (const owner of [forged, "t-owner-victim", victim.run.ctx, null]) {
+        expect(() => ui.messages.beforeSend(owner as never, "x", () => { })).toThrow(TypeError);
+        expect(() => other.chatBar.add(owner as never, "x", () => null)).toThrow("chatBar.add takes the plugin's own mist object");
+    }
+    // A mist that Evi hasn't loaded
+    const unknown = createMist("t-owner-unknown");
+    unknown.define({}).start!(fakeContext({ id: "t-owner-unknown" }).ctx);
+    expect(() => ui.popover.add(unknown, "x", () => null)).toThrow(ui.UnknownPluginError);
+    act(() => victim.run.dispose());
+});
+
+test("a send listener that never settles holds the message 5 seconds, then it goes on as it was and the plugin's log says so once", async () => {
+    jest.useFakeTimers();
+    try {
+        const { sent, go } = sendFixture();
+        const { mist, run } = plugin("t-send-hangs");
+        ui.messages.beforeSend(mist, "hangs", draft => {
+            draft.content = "half-done";
+            return new Promise(() => { });
+        });
+        // Lets the listeners before the hung one run, however many there are, so its timer is set
+        const ticks = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+        for (const content of ["one", "two"]) {
+            const going = go(content);
+            await ticks();
+            jest.advanceTimersByTime(4999);
+            await ticks();
+            expect(sent).not.toContain(content);
+            jest.advanceTimersByTime(1);
+            await going;
+        }
+        expect(sent).toEqual(["one", "two"]);
+        expect(errors(run).map(l => l.args[0])).toEqual(["t-send-hangs/hangs didn't finish within 5 s; the message goes on without it"]);
+        act(() => run.dispose());
+    } finally {
+        jest.useRealTimers();
+    }
 });

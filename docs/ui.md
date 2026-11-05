@@ -11,7 +11,7 @@
 import { accessories, Boundary, boundary, ChatBarButton, chatBar, host, messages, popover, state, useValue } from "@aurologic/mist-api/ui";
 ```
 
-The boundary, the state and the host work without `mist.define`. The registries need source patches, which a plugin adds to its `patches`.
+The boundary, the state and the host work without `mist.define`. The registries need the plugin's `mist`, after `mist.define`, and source patches, which a plugin adds to its `patches`.
 
 ## A plugin with a chat bar button
 
@@ -46,13 +46,27 @@ Call `add` and `beforeSend` in `start`. Each entry is removed when the plugin st
 
 ## Owners
 
-Every registry function and `host().set` takes an owner first. The owner is the plugin's `mist`, or Evi's `ctx` for a plugin that doesn't use mist-api's `createMist`. The owner decides three things:
+Every registry function and `host().set` takes an owner first. The owner decides three things:
 
 - The entry is removed when the owner's run stops.
 - Errors in the entry are logged through the owner's log, `mist.log.error` or `ctx.logger.error`.
 - The owner's id sorts the entry. Entries show in `<plugin id>/<entry id>` order, whatever order plugins start in.
 
+The registries (`chatBar`, `popover`, `accessories`, and `messages`) take only the plugin's own `mist`, from `createMist`, after `mist.define`. They check it at runtime against the handle that mist's page registry holds for its id, so a string id, Evi's `ctx`, or another object with the plugin's `id` throws a `TypeError`. Without this check, a plugin could name another plugin's id and borrow its permissions. `host().set` also takes Evi's `ctx`, for a plugin that doesn't use `createMist`, because a host hands the plugin nothing.
+
 Adding UI to a `mist` whose plugin isn't running throws, because `mist.ctx` throws then.
+
+## Permissions
+
+`popover.add`, `accessories.add`, `messages.beforeSend`, and `messages.beforeEdit` hand the plugin the content of messages, and the message hooks can also rewrite or cancel what the user sends. Each one needs the plugin's manifest to declare `readMessages`, or to declare no `permissions` at all, which is the rule Evi's guard applies to a plugin that hooks Discord's sending and editing:
+
+```json
+"permissions": { "readMessages": true }
+```
+
+Without it, the call throws a `PluginPermissionError`, as in `example can't read messages (popover.add): its manifest doesn't declare permissions.readMessages`, and nothing is added. A `mist` whose id Evi has no loaded plugin by throws an `UnknownPluginError`. Both classes are exported from `@aurologic/mist-api/ui`. `chatBar.add` hands the plugin no message, so it needs nothing.
+
+This check is like Evi's guard, and like it, it isn't a sandbox. Plugins share one JavaScript realm with Discord, so code that ignores mist can reach the registries' state on `globalThis` or patch Discord's code itself. It catches what an honest plugin forgot to declare. Evi's store review reads the code. [Security model](security.md#permissions-through-mist) has the details.
 
 ## Boundary
 
@@ -152,6 +166,7 @@ The four registries share one design:
 - The registry's state is on `globalThis` under a `Symbol.for("mist-api.ui/<name>@1")` key, so plugins that bundle different copies of mist-api share one registry. The first copy's functions serve every copy until Discord reloads.
 - Each entry renders inside a `Boundary` named `<plugin id>/<entry id>`. Adding an id that the plugin already used replaces that entry.
 - `add` and the message functions return a function that removes the entry. Stopping the plugin removes it too.
+- Each takes the plugin's `mist` as its owner, and `popover`, `accessories`, and `messages` need `readMessages`, as [Permissions](#permissions) describes.
 
 The patches are marked [`onDemand`](core.md#ondemand), because Discord loads the chat and message code only when a channel opens. Until then, `mist status` shows them as waiting.
 
@@ -164,7 +179,7 @@ interface ChatBarProps {
 	type?: { analyticsName?: string; };
 }
 
-chatBar.add(owner: Owner, id: string, Component: ComponentType<ChatBarProps>, options?: { fallback?: Fallback; }): () => void;
+chatBar.add(mist: MistOwner, id: string, Component: ComponentType<ChatBarProps>, options?: { fallback?: Fallback; }): () => void;
 
 function ChatBarButton(props: { label: string; onClick(event: MouseEvent): void; active?: boolean; children: ReactNode; }): ReactElement;
 ```
@@ -184,7 +199,7 @@ interface PopoverProps {
 	Button: ComponentType<{ label: string; icon: ComponentType<{ className?: string; }>; onClick(event: MouseEvent): void; dangerous?: boolean; disabled?: boolean; separator?: boolean; }>;
 }
 
-popover.add(owner: Owner, id: string, Component: ComponentType<PopoverProps>, options?: { fallback?: Fallback; }): () => void;
+popover.add(mist: MistOwner, id: string, Component: ComponentType<PopoverProps>, options?: { fallback?: Fallback; }): () => void;
 ```
 
 Adds a button to the hover bar of every message, before the quick reactions. Render `props.Button`, which is Discord's own hover bar button, with your label, icon and click handler:
@@ -204,7 +219,7 @@ interface AccessoryProps {
 	channel: Channel;
 }
 
-accessories.add(owner: Owner, id: string, Component: ComponentType<AccessoryProps>, options?: { fallback?: Fallback; }): () => void;
+accessories.add(mist: MistOwner, id: string, Component: ComponentType<AccessoryProps>, options?: { fallback?: Fallback; }): () => void;
 ```
 
 Adds UI under every message, after its embeds, attachments and reactions. The component renders for each message on screen, so return `null` quickly for the messages it isn't for, and keep the work for the others in `useStore` or `useMemo`.
@@ -223,13 +238,13 @@ interface EditDraft extends SendDraft {
 }
 type Verdict = void | { cancel: boolean; };
 
-messages.beforeSend(owner: Owner, id: string, listener: (draft: SendDraft) => Verdict | Promise<Verdict>): () => void;
-messages.beforeEdit(owner: Owner, id: string, listener: (draft: EditDraft) => Verdict | Promise<Verdict>): () => void;
+messages.beforeSend(mist: MistOwner, id: string, listener: (draft: SendDraft) => Verdict | Promise<Verdict>): () => void;
+messages.beforeEdit(mist: MistOwner, id: string, listener: (draft: EditDraft) => Verdict | Promise<Verdict>): () => void;
 ```
 
 `beforeSend` runs the listener before each message that the user sends from the chat box. `beforeEdit` runs it before each edit that the user saves. Spread `messages.patches` into the plugin's `patches` for either one.
 
-The listeners run after Discord has checked the message, so they don't run for a message that Discord turns down, such as one sent during slow mode. They run one at a time, in `<plugin id>/<entry id>` order, and the message waits for each one, so a listener can be `async`. A listener changes what is sent or saved by setting `draft.content`. Discord then handles the new content as it does what the user typed.
+The listeners run after Discord has checked the message, so they don't run for a message that Discord turns down, such as one sent during slow mode. They run one at a time, in `<plugin id>/<entry id>` order, and the message waits for each one, so a listener can be `async`. It waits at most 5 seconds for each listener. After that, the listener's plugin logs `<plugin id>/<entry id> didn't finish within 5 s; the message goes on without it` once, the content goes back to what it was before that listener, and the next listener runs. A listener that never settles can't hold up sending. A listener changes what is sent or saved by setting `draft.content`. Discord then handles the new content as it does what the user typed.
 
 A listener that returns `{ cancel: true }` stops the message, and the listeners after it don't run. Discord keeps the text in the message box, or the edit open, so the user can change it.
 

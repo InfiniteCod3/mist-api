@@ -65,8 +65,8 @@ export default defineNative({
 The returned module has these members:
 
 - Each method of `methods`, wrapped so that its calls are recorded with arguments, outcome, and time taken. A returned promise is recorded when it settles. A throw is recorded and thrown again.
-- `start`, which stores `ctx.pluginId` for log lines and then calls your `start` with the same `this` and `ctx`. The module has a `start` even if `methods` has none.
-- `stop`, which calls your `stop`, if `methods` has one. Then it aborts the `this.signal` of every call in flight, rejects every request still waiting for the page, and stops the event channel. The module has a `stop` even if `methods` has none.
+- `start`, which stores `ctx.pluginId` for log lines and then calls your `start` with `ctx`. Its `this` is the module with the run's `this.signal`. The module has a `start` even if `methods` has none.
+- `stop`, which calls your `stop`, if `methods` has one, with the run's `this.signal` as in `start`. Then it aborts that signal and the `this.signal` of every call in flight, rejects every request still waiting for the page, and stops the event channel. The module has a `stop` even if `methods` has none.
 - Hidden methods that the page side calls. `__mist_debugAllowed` and `__mist_logs` serve the debug gate and `mist native-logs`. `__mist_events` serves `mist.events`. `__mist_protocol` tells the page that this module answers [marked calls](#how-a-call-crosses-ipc). `__mist_abort` aborts a call, and `__mist_requests` and `__mist_reply` carry [requests](#nativerequests). `NativeClient` leaves them out of `mist.native`.
 
 Members of `methods` that aren't functions are skipped.
@@ -115,6 +115,8 @@ export default defineNative({
 ```
 
 An arrow function has no `this`, so write a method that reads `this.signal` with method syntax.
+
+In `start` and `stop`, `this.signal` is the run's signal. It aborts after `stop` returns, so work that `start` begins with it ends when the native side stops. A new `start` gets a new signal.
 
 ### NativeOptions
 

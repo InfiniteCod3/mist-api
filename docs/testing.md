@@ -45,6 +45,8 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | `getStore(name)` | Like `findStore`, but throws when there is no such store. |
 | `filters.byStoreName(name)` | A filter that takes the store added under `name`. |
 | `waitFor(filter, callback)` | Calls back at once with a store the filter takes. Otherwise it calls back when `evi.addStore` adds one. Returns a function that stops the wait. |
+| `find(filter)`, `findAll(filter)` | The first, or every, added store or export the filter takes. A filter that throws counts as not taking the value, as in Evi. |
+| `I18n` | `{ discordLocale: "en-US" }`. Set `discordLocale` to test another language. |
 | `Dispatcher` | A `fakeDispatcher()`. |
 | `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed, and then it isn't enumerable, so spreading the module object leaves it out. |
 
@@ -54,10 +56,11 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | --- | --- |
 | `addStore(name, store)` | Adds a store, and calls back each waiting `waitFor` whose filter takes it. This is how a test makes a store arrive late, as Discord makes many stores after a plugin starts. |
 | `removeStore(name)` | Removes a store. |
+| `addExport(value)` | Adds a module export that `find` and `findAll` search, as Evi's search Discord's webpack exports. |
 | `ready` | While `false`, `findStore` and `getStore` throw. `true` by default. |
 | `lookups` | Each name `findStore` and `getStore` were asked for, oldest first. |
 
-Only the members above exist. Code that uses another export of `@evi/api`, such as `showToast` or `filters.byProps`, needs the test to add it to the module object:
+The fake has every export that mist-api's own code imports from `@evi/api`. Only the members above exist. Code that uses another export of `@evi/api`, such as `showToast` or `filters.byProps`, needs the test to add it to the module object:
 
 ```ts
 mock.module("@evi/api", () => ({ ...evi.module, showToast: () => { } }));

@@ -164,3 +164,27 @@ test("fakeContext stubs what it doesn't fake with an error naming the override, 
     run.ctx.command({ name: "ping" } as never);
     expect(hooked).toEqual(["ping"]);
 });
+
+test("fakeEvi has every export mist-api imports from @evi/api, and find and findAll search added stores and exports", () => {
+    const { readdirSync, readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const src = join(import.meta.dir, "..", "src");
+    const imported = new Set<string>();
+    for (const file of readdirSync(src, { recursive: true, encoding: "utf8" }).filter(f => f.endsWith(".ts"))) {
+        for (const [, names] of readFileSync(join(src, file), "utf8").matchAll(/import \{([^}]*)\} from "@evi\/api"/g)) {
+            for (const name of names.split(",").map(n => n.trim()).filter(n => n && !n.startsWith("type "))) imported.add(name);
+        }
+    }
+    const evi = fakeEvi({ React: {} as never });
+    expect([...imported].filter(name => !(name in evi.module))).toEqual([]);
+    expect(imported.has("findAll")).toBe(true);
+
+    const button = { kind: "button" };
+    evi.addStore("ThingStore", { kind: "store" });
+    evi.addExport(button);
+    evi.addExport(null);
+    const isButton = (v: any) => v.kind === "button";
+    expect(evi.module.find(isButton)).toBe(button);
+    expect(evi.module.findAll((v: any) => typeof v.kind === "string")).toEqual([{ kind: "store" }, button]);
+    expect(evi.module.I18n.discordLocale).toBe("en-US");
+});

@@ -59,6 +59,12 @@ export interface FakeEviModule {
     getStore: EviApi["getStore"];
     waitFor: EviApi["waitFor"];
     filters: Pick<EviApi["filters"], "byStoreName">;
+    /** The first added store or export the filter takes */
+    find: EviApi["find"];
+    /** Every added store and export the filter takes */
+    findAll: EviApi["findAll"];
+    /** Discord's language, `"en-US"` until a test sets `discordLocale` */
+    I18n: { discordLocale: string; };
     Dispatcher: FakeDispatcher;
     /** The React passed to fakeEvi, for code that imports React from @evi/api */
     React: EviApi["React"];
@@ -70,6 +76,8 @@ export interface FakeEvi {
     /** Makes Discord's store `name`, and calls back each waitFor whose filter takes it */
     addStore(name: string, store: object): void;
     removeStore(name: string): void;
+    /** Adds a module export that find and findAll search, as Discord's webpack exports are */
+    addExport(value: unknown): void;
     /** While false, findStore and getStore throw, as Evi's do before Discord's webpack has loaded */
     ready: boolean;
     /** Each name findStore and getStore were asked for, oldest first */
@@ -83,6 +91,15 @@ export interface FakeEviOptions {
 
 export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
     const stores = new Map<string, object>();
+    const exported: unknown[] = [];
+    const takes = (filter: (value: any) => unknown, value: unknown) => {
+        try {
+            return !!filter(value);
+        } catch {
+            return false;
+        }
+    };
+    const searched = () => [...stores.values(), ...exported];
     const lookups: string[] = [];
     const waiting = new Set<{ filter: Filter; callback: (value: any, found: FoundExport) => void; }>();
     const found = (name: string, value: object): FoundExport => ({ id: `fake:${name}`, exports: value, key: undefined, value });
@@ -98,6 +115,7 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
             }
         },
         removeStore: name => void stores.delete(name),
+        addExport: value => void exported.push(value),
         module: {
             findStore: <T>(name: string) => {
                 lookups.push(name);
@@ -121,6 +139,9 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
                 waiting.add(waiter);
                 return () => void waiting.delete(waiter);
             },
+            find: (filter => searched().find(value => takes(filter, value))) as EviApi["find"],
+            findAll: (filter => searched().filter(value => takes(filter, value))) as EviApi["findAll"],
+            I18n: { discordLocale: "en-US" },
             Dispatcher: fakeDispatcher(),
             React: options.React!,
         },

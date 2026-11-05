@@ -53,8 +53,8 @@ export async function run() {
     const count = state(0);
     mist.ctx.onDispose(subscribe(count, () => { }));
     messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(); });
-    // @ts-expect-error a chat bar button gets ChatBarProps, not a string
-    chatBar.add(mist, "bad", (props: { channel: string; }) => props.channel);
+    // @ts-expect-error a draft's content is a string
+    messages.beforeEdit(mist, "bad", draft => { draft.content = draft.message.id.length; });
     for await (const message of discord.messages("1", { limit: 1 })) { const id: string = message.id; void id; }
     // @ts-expect-error a page goes from before or from after, not both
     discord.messages("1", { before: "1", after: "2" });

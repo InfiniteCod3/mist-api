@@ -307,7 +307,7 @@ test("send listeners don't run for a message Discord turned down", async () => {
 test("edit listeners see the message, change what's saved, and can cancel the edit", async () => {
     const saved: string[] = [];
     const { edit } = load(patch(editModule, [ui.messages.patches[1]]), { saved: (_c: string, _m: string, content: string) => void saved.push(content) });
-    const go = (content: string) => edit(content, { id: "c" }, { id: "m", content: "old" }, async () => ({ valid: true })) as Promise<{ shouldClear: boolean; }>;
+    const go = (content: string) => edit(content, { id: "c" }, { id: "m", content: "old" }, async () => ({ valid: true })) as Promise<{ shouldClear: boolean; shouldRefocus: boolean; }>;
     const run = fakeContext({ id: "t-edit" });
     ui.messages.beforeEdit(run.ctx, "sign", draft => { draft.content = `${draft.content} (from ${draft.message.id})`; });
     ui.messages.beforeEdit(run.ctx, "veto", draft => draft.content.startsWith("no") ? { cancel: true } : undefined);

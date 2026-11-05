@@ -9,11 +9,15 @@ jobs:
   check:
     runs-on: ubuntu-26.04
     steps:
+      # Full history and tags: tests load mist-api as released at v0.2.1 from git
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          # Node 22's in-process inspector crashes in the CLI fixtures; the CLI itself never uses it
+          node-version: 26
       - run: bun install --frozen-lockfile
       # Clones BleedDev/evi into .evi, so @evi/api resolves
       - run: bun scripts/setup.ts

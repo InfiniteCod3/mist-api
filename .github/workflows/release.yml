@@ -14,7 +14,10 @@ jobs:
   publish:
     runs-on: ubuntu-26.04
     steps:
+      # Full history and tags: tests load mist-api as released at v0.2.1 from git
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       # npm stage publish needs npm 11.15 or later and Node 22.14 or later; Node 26 ships npm 12
       - uses: actions/setup-node@v7

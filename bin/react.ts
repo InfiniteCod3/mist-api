@@ -1,4 +1,7 @@
-/** mist react: the React components that render an element, nearest first, with their props masked and Evi's hooks marked */
+/**
+ * mist react: the React components that render an element, nearest first, with their props masked and
+ * Evi's hooks marked. A password or one-time-code input's value is masked too.
+ */
 import { evaluate, type Send } from "./cdp.ts";
 import { type Limits, pageExpression } from "./page.ts";
 
@@ -46,6 +49,11 @@ function reactPage(snapshot: (value: unknown, limits: Limits) => unknown, select
         if (!props || typeof props !== "object") return props ?? null;
         const { children, ...rest } = props;
         const shown: Record<string, unknown> = rest;
+        const autocomplete = Object.keys(shown).find(k => k.toLowerCase() === "autocomplete");
+        // A typed password or code is a prop named value, which snapshot's name check doesn't mask
+        if (String(shown.type).toLowerCase() === "password" || (autocomplete && /password|one-time-code/i.test(String(shown[autocomplete])))) {
+            for (const k of ["value", "defaultValue"]) if (shown[k] !== undefined) shown[k] = "[secret]";
+        }
         if (children !== undefined) shown.children = Array.isArray(children) ? `[${children.length} children]` : typeof children === "string" ? children : "[1 child]";
         return snapshot(shown, limits);
     };

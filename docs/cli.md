@@ -283,9 +283,11 @@ With an id, `errors` prints only the errors that it attributes to that plugin. I
 2. A stack frame in a plugin's code, which Evi evaluates as `evi://plugins/<id>.js`.
 3. A stack frame in a module that Evi patched, `evi://modules/<n>.js`: every plugin with a patch on that module. To find them, `errors` reads `Evi.diagnosePatches()` once.
 
-Evi's watch build, `bun scripts/build.ts --watch`, adds an inline source map to each plugin. For such a plugin, `errors` prints each of its frames at the place in your source file, as in `at boom (src/index.ts:3:11)`. Other builds have no map, and their frames show as `evi://plugins/<id>.js:<line>:<column>`. To read the maps, `errors` turns on CDP's debugger with every pause skipped.
+Evi's watch build, `bun scripts/build.ts --watch`, adds an inline source map to each plugin. For such a plugin, `errors` prints each of its frames at the place in your source file, as in `at boom (src/index.ts:3:11)`. Other builds have no map, and their frames show as `evi://plugins/<id>.js:<line>:<column>`. After a hot reload, the old build and the new one have the same URL. A frame that CDP reports names the script it ran in, so `errors` maps it through that build's map. A frame read from an error's stack text names only the URL, so `errors` maps it only when one build has that URL, and otherwise prints it unmapped.
 
-Object arguments are copied with the masking of recorded values and cut to the display bounds, as a `flux` payload is. An error's message and stack are text, so they are never masked.
+To read the maps, `errors` turns on CDP's debugger. It tells the debugger to skip every pause before it turns it on, so a breakpoint or a `debugger;` statement never stops Discord's page. If the debugger doesn't accept that, `errors` stops with an error and turns nothing on. A pause that comes anyway, as when another debugging client turns skipping off, is resumed at once. `module` turns on the debugger the same way.
+
+Object arguments are copied with the masking of recorded values and cut to the display bounds, as a `flux` payload is. An error's message and stack are text, so they aren't masked by name. Instead, every URL in the printed text and in the frames loses its query string and fragment, and a webhook URL's token, the segment after `/webhooks/<id>/`, shows as `[secret]`.
 
 ## perf
 
@@ -328,7 +330,7 @@ mist module '"premium-feature-tier"'
 
 Prints a webpack module's source as it ran. Give the module's id, or text that only one module's source contains. When several modules contain the text, `module` lists their ids.
 
-When Evi patched the module, it compiled a copy with the source URL `evi://modules/<id>.js`, and `module` reads that copy through CDP's debugger. Otherwise it prints Discord's original, and says whether the module is loaded yet. The first line names the patches whose records list the module.
+When Evi patched the module, it compiled a copy with the source URL `evi://modules/<id>.js`, and `module` reads that copy through CDP's debugger, with every pause skipped as for [errors](#errors). Otherwise it prints Discord's original, and says whether the module is loaded yet. The first line names the patches whose records list the module.
 
 With `--diff`, `module` prints each change against the original, with 40 characters around it:
 
@@ -340,7 +342,7 @@ With `--diff`, `module` prints each change against the original, with 40 charact
   0,v.jsx)(E7,{hovered:t,activities:i…
 ```
 
-Each change names the plugins it is likely from: the plugins whose `$self` the added code calls, and the patches whose `match` matches where the change is. When neither says, it names every patch on the module, after `maybe`. Changes closer than 32 characters are shown as one. The diff gives up on a copy that differs in more than 4000 tokens.
+Each change names the plugins it is likely from: the plugins whose `$self` the added code calls, and the patches whose `match` matches where the change is. The diff and the matches run on Discord's original as Evi patches it, where a method shorthand factory such as `123(e,t,n){` starts with `function(e,t,n){`. When neither says, it names every patch on the module, after `maybe`. Changes closer than 32 characters are shown as one. The diff gives up on a copy that differs in more than 4000 tokens.
 
 ## react
 
@@ -351,7 +353,7 @@ mist react 'nav ul' --depth 4
 
 Finds the first element that matches the CSS selector and prints the element, then each React component above it, nearest first, up to `--depth` components (10 by default). Each line is a component's name and its kind (`class`, `memo`, `forwardRef`, or `context`; a function component shows no kind), with its props on the next line. Discord's code is minified, so many names are one or two letters.
 
-Props are copied with the masking of recorded values, two levels deep, and `--full` uses the larger bounds. `children` shows as a count.
+Props are copied with the masking of recorded values, two levels deep, and `--full` uses the larger bounds. `children` shows as a count. When the props have `type: "password"`, or an `autoComplete` that mentions `password` or `one-time-code`, their `value` and `defaultValue` show as `[secret]`.
 
 `hooked by Evi` marks a component whose function Evi wrapped for a plugin's hook. Evi keeps no record of whose hook it is, so `react` names the plugins with a measured hook site named after the component, after `maybe`, and names none for a one- or two-letter name.
 
@@ -364,8 +366,8 @@ mist manifest fix plugins/weather-demo --write
 
 Reads `manifest.json` in the folder, or in the current folder, and checks it against two rules of Evi's store. It doesn't connect to Discord.
 
-- Translations. Every language Evi ships besides English (`de`, `es`, `fr`, `ja`, `pl`, `pt-BR`, `ru`, `tr`) needs `name`, `description` when the English one isn't empty, and notes for the current version in `locales.<language>`, as Evi's upload check asks. `manifest fix` lists each one that is missing. With `--write`, it adds each as a copy of the English text. Translate them before you upload. The check of the code's `defineStrings` tables isn't part of this command: `bun run preview-plugin` in Evi runs it.
-- Size. Evi's store refuses a built `manifest.json` over 16 KB (16384 bytes). `manifest fix` measures the manifest as Evi's build writes it, with `main` and, when there is a `native.ts`, `native` added. When it is over, `manifest fix` drops the other languages' notes for the oldest versions, oldest first, until it fits. English notes stay, and a language without notes for a version shows the English ones. The current version's notes are never dropped. If the manifest is still over, `manifest fix` says by how many bytes.
+- Translations. Every language Evi ships besides English (`de`, `es`, `fr`, `ja`, `pl`, `pt-BR`, `ru`, `tr`) needs `name`, `description` when the English one isn't empty, and notes for the current version in `locales.<language>`, as Evi's upload check asks. An empty list of notes counts as missing, and an entry for the current version in the English `changelog` asks for notes even when its own list is empty. `manifest fix` lists each one that is missing. With `--write`, it adds each as a copy of the English text. Translate them before you upload. The check of the code's `defineStrings` tables isn't part of this command: `bun run preview-plugin` in Evi runs it.
+- Size. Evi's plugin CLI refuses to upload a built `manifest.json` over 16 KB (16384 bytes). `manifest fix` measures the manifest as Evi's build writes it, with `main` and, when there is a `native.ts`, `native` added. When it is over, `manifest fix` drops the other languages' notes for the oldest versions, oldest first, until it fits. Versions are ordered as semver, so a prerelease such as `1.1.0-beta.2` is older than `1.1.0`. English notes stay, and a language without notes for a version shows the English ones. The current version's notes are never dropped. If the manifest would still be over with every old translated note gone, `manifest fix` drops nothing, writes nothing, even with `--write`, and says by how many bytes it is over.
 
 Without `--write`, it changes nothing and says what it would do. `--write` writes `manifest.json` with four-space indentation.
 
@@ -388,7 +390,11 @@ Turns the plugin off and on `--cycles` times, 3 by default, through `Evi.plugins
 
 It prints each count against the first, and `LEAK?` for each count that rose after every stop and after every start. Discord changes the page on its own, so one cycle's rise doesn't count, and a busy channel can raise `nodes` without a leak.
 
-`leaks` changes the plugin's switch in Evi's settings and runs its `stop` and `start`, so it runs only on a dev build that is running, and only with `--yes`. Without `--yes`, it checks the plugin and says what it would do. It leaves the plugin on, also when a cycle fails.
+`leaks` changes the plugin's switch in Evi's settings and runs its `stop` and `start`, so it runs only on a dev build that is running, and only with `--yes`. Without `--yes`, it checks the plugin and says what it would do.
+
+`leaks` refuses a plugin with a native side or Chromium switches. Each time such a plugin is turned on, Evi asks you in a dialog, so `leaks` couldn't turn it on again by itself.
+
+`leaks` leaves the plugin on, also when a cycle fails or turning it off fails. Ctrl+C stops it at the next step, after it turns the plugin on again. A second Ctrl+C doesn't exit before that. If turning the plugin on again fails, `leaks` says so: turn it on in Evi's settings.
 
 ## restart
 

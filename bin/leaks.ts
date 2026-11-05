@@ -1,7 +1,7 @@
 /**
  * mist leaks: turns a dev build off and on, counting what the page holds after each stop and each
  * start. A count that grows with every cycle is what a stop left behind. This changes the plugin's
- * switch, so it runs only on dev builds, and leaves the plugin on.
+ * switch, so it runs only on dev builds that stay in Discord's page, and leaves the plugin on.
  */
 import { CdpError, evaluate, type Send } from "./cdp.ts";
 import { pageExpression } from "./page.ts";
@@ -21,9 +21,11 @@ export const COUNTS: (keyof Counts)[] = ["nodes", "styles", "subscribers", "inte
 export interface Cycle { off: Counts; on: Counts; }
 export interface LeakReport { plugin: string; before: Counts; cycles: Cycle[]; growth: Partial<Record<keyof Counts, number>>; }
 
-function plugin(id: string): { source: string; running: boolean; } | null {
+interface Target { source: string; running: boolean; native: boolean; switches: boolean; }
+
+function plugin(id: string): Target | null {
     const s = (globalThis as any).Evi?.plugins?.get(id);
-    return s ? { source: s.source, running: s.running } : null;
+    return s ? { source: s.source, running: s.running, native: !!s.manifest?.native, switches: Object.keys(s.manifest?.chromiumSwitches ?? {}).length > 0 } : null;
 }
 
 function measure(): Omit<Counts, "listeners"> {
@@ -48,20 +50,27 @@ export interface LeakOptions {
     /** How long a start may take */
     startMs?: number;
     onCycle?: (cycle: Cycle, index: number) => void;
+    /** Checked between steps: true ends the run, with the plugin on again */
+    stopped?: () => boolean;
 }
 
-/** Refuses anything but a dev build that is running, before it changes anything */
+/** Refuses anything but a running dev build that stays in Discord's page, before it changes anything */
 export async function checkLeakTarget(send: Send, id: string): Promise<void> {
-    const found = await evaluate<{ source: string; running: boolean; } | null>(send, pageExpression(plugin, [id]));
+    const found = await evaluate<Target | null>(send, pageExpression(plugin, [id]));
     if (!found) throw new CdpError(`${id} isn't installed`);
     if (found.source !== "dev") throw new CdpError(`mist leaks turns plugins off and on, so it runs only on dev builds, and ${id} is a ${found.source} install`);
+    // src/main/plugins.ts askToEnable: main asks the user before each turn-on of such a plugin
+    if (found.native || found.switches) throw new CdpError(`${id} has ${found.native ? "a native side" : "Chromium switches"}, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself`);
     if (!found.running) throw new CdpError(`${id} isn't running: turn it on first, so mist leaks can leave it as it was`);
 }
 
 export async function findLeaks(send: Send, id: string, options: LeakOptions): Promise<LeakReport> {
-    const { cycles, settleMs = 1500, startMs = 10_000 } = options;
+    const { cycles, settleMs = 1500, startMs = 10_000, stopped = () => false } = options;
     await checkLeakTarget(send, id);
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const step = () => {
+        if (stopped()) throw new CdpError(`mist leaks stopped at Ctrl+C. ${id} is on.`);
+    };
     const listeners = async (): Promise<number | null> => {
         try {
             const { metrics } = await send("Performance.getMetrics");
@@ -77,29 +86,35 @@ export async function findLeaks(send: Send, id: string, options: LeakOptions): P
     let turnedOff = false;
     try {
         await wait(settleMs);
+        step();
         const before = await count();
         const done: Cycle[] = [];
         for (let i = 0; i < cycles; i++) {
-            await setEnabled(false);
+            step();
+            // Before the call: a turn-off that fails or times out may still have turned it off
             turnedOff = true;
+            await setEnabled(false);
             await wait(settleMs);
+            step();
             const off = await count();
             await setEnabled(true);
             turnedOff = false;
             const until = Date.now() + startMs;
-            while (!(await evaluate<{ running: boolean; } | null>(send, pageExpression(plugin, [id])))?.running) {
+            while (!(await evaluate<Target | null>(send, pageExpression(plugin, [id])))?.running) {
                 if (Date.now() > until) throw new CdpError(`${id} didn't start again within ${startMs / 1000} s: mist errors ${id} shows why`);
                 await wait(100);
             }
             await wait(settleMs);
+            step();
             const cycle = { off, on: await count() };
             done.push(cycle);
             options.onCycle?.(cycle, i);
         }
         return { plugin: id, before, cycles: done, growth: growth(before, done) };
     } finally {
-        if (turnedOff) await setEnabled(true).catch(() => { });
+        const turnOnError = turnedOff ? await setEnabled(true).then(() => null, (err: Error) => err.message) : null;
         await send("Performance.disable").catch(() => { });
+        if (turnOnError !== null) throw new CdpError(`${id} may be off: turning it on again failed (${turnOnError}). Turn it on in Evi's settings.`);
     }
 }
 

@@ -1,9 +1,9 @@
 # Native toolkit
 
-`@aurologic/mist-api/native` also has helpers for what native sides do over and over: find Discord's window, run programs, clean up on stop, keep files, keep secrets, and take paths from a file dialog. Each one works with or without `defineNative`.
+`@aurologic/mist-api/native` also has helpers for what native sides do over and over: find Discord's window, run programs, clean up on stop, keep files, keep secrets, take paths from a file dialog, check the page's arguments, keep a site's login, and open links. Each one works with or without `defineNative`.
 
 ```ts
-import { dataFolder, discordWindow, jsonFile, lifetime, pathGrants, run, secrets, which } from "@aurologic/mist-api/native";
+import { check, dataFolder, discordWindow, jsonFile, lifetime, loginWindow, openExternal, pathGrants, privateSession, run, secrets, which } from "@aurologic/mist-api/native";
 ```
 
 Evi's build bundles only what a native side imports. A native side that imports only `defineNative` carries no `child_process`, `electron`, or file code, so Evi's review doesn't flag programs, files, or Electron in its `native.js`.
@@ -250,3 +250,125 @@ export default defineNative({
 Handles are kept in `mist-grants.json` in the plugin's `dataFolder`, so a handle the page saved still works after Discord restarts. A handle lasts until it's revoked, so revoke one the plugin no longer needs. Each pick makes a new handle, even for a path picked before.
 
 A handle limits which path native code reaches, not who asks. Any code that reaches the plugin's page side can pass a handle it has. `resolveGrant` checks the path's text and doesn't follow links: a symbolic link or junction inside a granted folder leads where it points.
+
+## check
+
+```ts
+const check: {
+	text(value: unknown, options: { max: number; min?: number; name?: string; }): string;
+	id(value: unknown, name?: string): string;
+	int(value: unknown, options: { min: number; max: number; name?: string; }): number;
+	bool(value: unknown, name?: string): boolean;
+	oneOf<const T>(value: unknown, list: readonly T[], name?: string): T;
+	https(value: unknown, options?: { hosts?: readonly string[]; name?: string; }): URL;
+	list<T>(value: unknown, item: (value: unknown, name: string) => T, options: { max: number; name?: string; }): T[];
+	record(value: unknown, name?: string): Record<string, unknown>;
+};
+```
+
+Guards for the arguments a native method gets from the page. TypeScript types a method's parameters for the page side, but nothing checks them across IPC, and any code on the page can call the method with anything. Each guard returns the value with its type, or throws a `NativeError` with the code `bad-argument` and `data` of `{ name, expected }`, as in `{ name: "city", expected: "a string of 1 to 100 characters" }`. The message is `<name> must be <expected>`. The page's call rejects with a `MistNativeError` with the same code and data. `name` defaults to `"value"`.
+
+- `text` takes a string of `min` (default 0) to `max` characters.
+- `id` takes a Discord id: a string of 1 to 20 digits.
+- `int` takes a whole number from `min` to `max`, both included.
+- `bool` takes `true` or `false`, not a truthy value.
+- `oneOf` takes a value that is `===` to an item of `list`, and returns it typed as the list's item type.
+- `https` takes an https URL of at most 8192 characters, without a user name or password, and returns it parsed. With `hosts`, the host must be one of them: `"example.com"` is that host only, and `"*.example.com"` is any host under it but not `example.com` itself, so list both for both.
+- `list` takes an array of at most `max` items and checks each with `item`, which gets the item's name as `name[i]`, so the error names the item that failed. A guard such as `check.id` can be the `item`.
+- `record` takes an object that isn't `null` or an array, to read fields from. Check each field you read.
+
+```ts
+export default defineNative({
+	async forecast(rawCity: unknown, rawDays: unknown, rawUnits: unknown) {
+		const city = check.text(rawCity, { min: 1, max: 100, name: "city" });
+		const days = check.int(rawDays, { min: 1, max: 14, name: "days" });
+		const units = check.oneOf(rawUnits, ["metric", "imperial"] as const, "units");
+		return fetchJson(`https://api.example.com/forecast?city=${encodeURIComponent(city)}&days=${days}&units=${units}`);
+	},
+});
+```
+
+## privateSession
+
+```ts
+function privateSession(ctx: NativeContext, name: string, options?: { browserUserAgent?: boolean; }): PrivateSession;
+
+interface PrivateSession {
+	readonly session: Session;
+	readonly partition: string;
+	fetch(url: string | URL, init?: RequestInit): Promise<Response>;
+	json(url: string | URL, init?: TimedInit): Promise<unknown>;
+	cookie(url: string, name: string): Promise<string | undefined>;
+	hasCookie(url: string, name: string): Promise<boolean>;
+	clear(): Promise<void>;
+	flush(): Promise<void>;
+}
+```
+
+A login to another site, kept apart from Discord's. It is an Electron session on the partition `persist:<plugin id>-<name>`, which Electron keeps on disk, so the login lasts across restarts. The site never gets Discord's cookies, and Discord's pages never get the site's. `name` is 1 to 40 lowercase letters, digits and `-`, or it throws a `TypeError`. A call with the same name gives the same Electron session.
+
+Every permission request and permission check from the session's pages is denied: camera, microphone, notifications, clipboard, and the rest. To allow one, set your own handler on `session` after the call. Some sites refuse a login from a browser that says it is Electron. `browserUserAgent: true` takes the `Electron/...` and `discord/...` tokens out of the session's user agent, so it reads as Chrome's.
+
+- `fetch` is Electron's `session.fetch`: it sends the session's cookies and keeps the ones the site sets.
+- `json` fetches with a timeout, `timeout` in `init`, 10000 ms by default, as `fetchJson` does. It returns the parsed body of a 2xx answer and throws util's `HttpError` for any other status.
+- `cookie(url, name)` is the value of the cookie `name` that the session would send to `url`, or `undefined`. `hasCookie` says whether there is one, which is how to tell that the user is signed in.
+- `clear` signs out of everything: it removes the session's cookies, storage, and cache.
+- `flush` writes the cookies to disk now. Electron otherwise writes them some time later, and a crash before then loses a new login. `loginWindow` flushes when it ends.
+
+```ts
+let site: PrivateSession;
+
+export default defineNative({
+	start(ctx) {
+		site = privateSession(ctx, "music", { browserUserAgent: true });
+	},
+	signedIn: () => site.hasCookie("https://music.example.com", "session"),
+	nowPlaying: () => site.json("https://music.example.com/api/now-playing"),
+	signOut: () => site.clear(),
+});
+```
+
+## loginWindow
+
+```ts
+function loginWindow(session: PrivateSession | Session, options: LoginWindowOptions): Promise<boolean>;
+
+interface LoginWindowOptions {
+	url: string;
+	done(url: string): boolean | Promise<boolean>;
+	signal?: AbortSignal;
+	title?: string;
+	width?: number;
+	height?: number;
+	pollMs?: number;
+}
+```
+
+Shows a site's login page in a window of the private session and waits for the user to sign in. The window is centred over Discord's, `width` by `height` (480 by 720 by default), and shows once the page is ready. With `title`, the page can't change the window's title. The window has no Node, no preload, and context isolation, and runs sandboxed. Popups are denied, and a navigation or redirect to anything but https is stopped. `url` must be https, or it throws a `TypeError`.
+
+`done` is asked with the page's URL after each navigation, and every `pollMs` (1000 by default) for a login that finishes without one. The promise resolves `true` the first time `done` answers `true`. It resolves `false` when the user closes the window or `signal` aborts. A `done` that throws or rejects is asked again later. Either way, the window is destroyed and the session's cookies are flushed to disk before the promise resolves.
+
+One window is open per session. A call while one is open focuses that window, restores it if it is minimized, and returns its promise; its own options are not used. Pass `this.signal` or a lifetime's `signal`, so the window closes when the call is aborted or the native side stops.
+
+```ts
+async connect(): Promise<boolean> {
+	return loginWindow(site, {
+		url: "https://music.example.com/login",
+		title: "Sign in to the music service",
+		done: () => site.hasCookie("https://music.example.com", "session"),
+		signal: this.signal,
+	});
+},
+```
+
+## openExternal
+
+```ts
+function openExternal(url: unknown, options?: { hosts?: readonly string[]; }): Promise<void>;
+```
+
+Opens a link in the user's browser with Electron's `shell.openExternal`. The link must be an https URL, checked as `check.https` checks it, with `hosts` if given. Anything else rejects with a `NativeError` `bad-argument`. Electron's shell also opens files, programs, and other protocols, so a native method that passes a link from the page straight to it lets the page start any of them.
+
+```ts
+openDocs: (link: unknown) => openExternal(link, { hosts: ["docs.example.com"] }),
+```

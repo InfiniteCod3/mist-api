@@ -14,12 +14,13 @@ import { errorLines, type ErrorRecord, watchErrors } from "./errors.ts";
 import { type FluxBatch, watchFlux } from "./flux.ts";
 import { inspect, inspectLines } from "./inspect.ts";
 import { checkLeakTarget, findLeaks, leakLines } from "./leaks.ts";
-import { fixLines, fixManifestDir } from "./manifest.ts";
+import { bumpLines, bumpManifestDir, fixLines, fixManifestDir } from "./manifest.ts";
 import { moduleLines, readModule } from "./module.ts";
 import { DISPLAY, RECORDED } from "./page.ts";
 import { perfLines, readPerf } from "./perf.ts";
 import { reactLines, readReact } from "./react.ts";
 import { callStore, listStore, type StoreMethods } from "./store.ts";
+import { waitForPlugin, waitLine } from "./wait.ts";
 
 const USAGE = `mist <command> [options]
 
@@ -40,8 +41,10 @@ const USAGE = `mist <command> [options]
   module <id|text> [--diff]   a webpack module's patched source, or its diff against the original
   react <selector>            the React components above an element, their props, and which are hooked
   manifest fix [dir]          missing translations, and a changelog over Evi's 16 KB; --write fixes
+  manifest bump [dir] <version|patch|minor|major> --note "..."
+                              the next version and its changelog entry; --write writes it
   leaks <id> --yes            turns a dev plugin off and on, comparing what stays behind
-  restart                     restarts Discord with --remote-debugging-port
+  restart [--wait <id>]       restarts Discord with --remote-debugging-port; --wait waits for a plugin to run
 
   --port <n>   debugging port (default 9222)
   -n <count>   how many records (default 50); flux: how many actions
@@ -51,14 +54,18 @@ const USAGE = `mist <command> [options]
   --all        inspect: every match, not only the first; perf: every site, not the top 5
   --dry-run    restart: prints what it would run
   --diff       module: the patches' changes instead of the whole source
-  --write      manifest fix: writes the fixes to manifest.json
+  --write      manifest fix, bump: writes manifest.json
+  --note <text>        manifest bump: an English note for the new version; repeat for more
+  --note-<lang> <text> manifest bump: that language's note (de, es, fr, ja, pl, pt-BR, ru, tr); without one, a copy of the English
+  --wait <id>  restart: waits until that plugin's page side runs
+  --timeout <s> restart --wait: how long to wait (default 60)
   --cycles <n> leaks: how many off and on cycles (default 3)
   --yes        leaks: turns the plugin off and on; without it, leaks only checks it may`;
 
-interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; full: boolean; depth: number | null; all: boolean; diff: boolean; write: boolean; cycles: number; yes: boolean; }
+interface Options { port: number; count: number; json: boolean; follow: boolean; dryRun: boolean; full: boolean; depth: number | null; all: boolean; diff: boolean; write: boolean; cycles: number; yes: boolean; notes: Record<string, string[]>; wait: string | null; timeout: number; }
 
 function parse(argv: string[]): { positional: string[]; options: Options; } {
-    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false, full: false, depth: null, all: false, diff: false, write: false, cycles: 3, yes: false };
+    const options: Options = { port: 9222, count: 50, json: false, follow: false, dryRun: false, full: false, depth: null, all: false, diff: false, write: false, cycles: 3, yes: false, notes: {}, wait: null, timeout: 60 };
     const positional: string[] = [];
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -79,8 +86,12 @@ function parse(argv: string[]): { positional: string[]; options: Options; } {
         else if (arg === "--write") options.write = true;
         else if (arg === "--yes") options.yes = true;
         else if (arg === "--cycles") options.cycles = Number(value());
+        else if (arg === "--wait") options.wait = value();
+        else if (arg === "--timeout") options.timeout = Number(value());
+        else if (arg === "--note" || arg.startsWith("--note-")) (options.notes[arg === "--note" ? "en" : arg.slice(7)] ??= []).push(value());
         else positional.push(arg);
     }
+    if (!(options.timeout > 0)) throw new CdpError("--timeout must be a number of seconds above 0");
     if (!Number.isInteger(options.port) || options.port < 1) throw new CdpError("--port must be a port number");
     if (!Number.isInteger(options.count) || options.count < 1) throw new CdpError("-n must be a positive number");
     if (options.depth !== null && (!Number.isInteger(options.depth) || options.depth < 0)) throw new CdpError("--depth must be 0 or more");
@@ -268,7 +279,8 @@ async function flux(c: Connection, types: string[], options: Options) {
     }));
 }
 
-function restart(port: number, dryRun: boolean) {
+/** Resolves once Discord is started again, or the command to do that is printed */
+async function restart(port: number, dryRun: boolean) {
     const flag = `--remote-debugging-port=${port}`;
     if (process.platform !== "win32") {
         const command = process.platform === "darwin"
@@ -285,14 +297,11 @@ function restart(port: number, dryRun: boolean) {
         for (const [cmd, args] of [kill, start]) console.log([cmd, ...args].map(a => a.includes(" ") ? `"${a}"` : a).join(" "));
         return;
     }
-    const killer = spawn(kill[0], kill[1], { stdio: "ignore" });
-    killer.on("exit", () => {
-        // Discord takes a moment to let go of its single-instance lock
-        setTimeout(() => {
-            spawn(start[0], start[1], { detached: true, stdio: "ignore" }).unref();
-            console.log(`Discord restarts with ${flag}`);
-        }, 1500);
-    });
+    await new Promise(resolve => spawn(kill[0], kill[1], { stdio: "ignore" }).on("exit", resolve));
+    // Discord takes a moment to let go of its single-instance lock
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    spawn(start[0], start[1], { detached: true, stdio: "ignore" }).unref();
+    console.log(`Discord restarts with ${flag}`);
 }
 
 async function main() {
@@ -301,10 +310,23 @@ async function main() {
         console.log(USAGE);
         return;
     }
-    if (command === "restart") return restart(options.port, options.dryRun);
+    if (command === "restart") {
+        await restart(options.port, options.dryRun);
+        if (!options.wait || options.dryRun) return;
+        const result = await waitForPlugin(options.port, options.wait, options.timeout * 1000);
+        console.log(waitLine(options.wait, result));
+        if (!result.running) process.exitCode = 1;
+        return;
+    }
     if (command === "manifest") {
-        if (rest[0] !== "fix") throw new CdpError("mist manifest has one subcommand: mist manifest fix [dir]");
-        return print(fixManifestDir(rest[1] ?? ".", options.write), options.json, fixLines);
+        if (rest[0] === "fix") return print(fixManifestDir(rest[1] ?? ".", options.write), options.json, fixLines);
+        if (rest[0] === "bump") {
+            // mist manifest bump [dir] <version>: the version is always last
+            const [dir, target] = rest.length > 2 ? [rest[1], rest[2]] : [".", rest[1]];
+            if (!target) throw new CdpError("mist manifest bump needs the new version, or patch, minor or major");
+            return print(bumpManifestDir(dir, target, options.notes, options.write), options.json, bumpLines);
+        }
+        throw new CdpError("mist manifest has two subcommands: mist manifest fix [dir], mist manifest bump [dir] <version>");
     }
 
     const needId = () => {

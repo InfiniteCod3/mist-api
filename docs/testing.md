@@ -1,9 +1,9 @@
 # Testing
 
-`@aurologic/mist-api/testing` has test doubles for a plugin's unit tests: a fake plugin context, a fake Flux store, a fake Flux dispatcher, and a fake `@evi/api` module. They work with any test runner. The module imports no runner and nothing at runtime from `@evi/api`, so it loads in Bun, Vitest, Jest, or plain Node.
+`@aurologic/mist-api/testing` has test doubles for a plugin's unit tests: a fake plugin context, a fake Flux store, a fake Flux dispatcher, a fake `@evi/api` module, and a fake `electron` module. They work with any test runner. The module imports no runner, nothing at runtime from `@evi/api`, and not Electron, so it loads in Bun, Vitest, Jest, or plain Node.
 
 ```ts
-import { fakeContext, fakeDispatcher, fakeEvi, fakeStore } from "@aurologic/mist-api/testing";
+import { fakeContext, fakeDispatcher, fakeElectron, fakeEvi, fakeStore } from "@aurologic/mist-api/testing";
 ```
 
 A plugin never bundles it. Import it only from test files.
@@ -49,6 +49,7 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | `I18n` | `{ discordLocale: "en-US" }`. Set `discordLocale` to test another language. |
 | `Dispatcher` | A `fakeDispatcher()`. |
 | `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed, and then it isn't enumerable, so spreading the module object leaves it out. |
+| `Components` | Evi's components, empty, so the `Button` and `Tip` of `@aurologic/mist-api/ui` render their own fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. |
 
 `evi` itself controls the fake:
 
@@ -180,3 +181,65 @@ messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(
 ```
 
 Leave out `permissions` for a plugin that declares none.
+
+## Mock electron
+
+```ts
+function fakeElectron(options?: FakeElectronOptions): FakeElectron;
+```
+
+Electron's main-process module only exists inside Electron, so a native side's unit tests need a module mock of `electron`. `fakeElectron()` makes the mock's module object, and the parts of it that mist-api's native toolkit and most native sides use:
+
+```ts
+// Bun
+import { mock } from "bun:test";
+import { fakeElectron } from "@aurologic/mist-api/testing";
+
+const electron = fakeElectron({ fetch: url => url.endsWith("/now") ? Response.json({ title: "A song" }) : new Response("", { status: 404 }) });
+mock.module("electron", () => electron.module);
+const { default: native } = await import("./native");
+```
+
+`electron.module` has these members:
+
+| Member | Fake |
+| --- | --- |
+| `BrowserWindow` | A constructor: `new BrowserWindow(options)` makes a window that records `options` and every `loadURL`. `getAllWindows()` lists the windows not destroyed, `fromId(id)` finds one, and `getFocusedWindow()` is the last one focused. |
+| `session` | `fromPartition(partition)` gives one session per partition, and `defaultSession` is the session of `""`. Each session's `fetch` is answered by the fake's `fetch` and recorded in `fetched`. It has a cookie jar (`cookies.get`, `set`, `remove`, `flushStore`, and the `changed` event), records its permission handlers, keeps a user agent, and `clearStorageData()` empties the jar. |
+| `shell` | `openExternal(url)` adds `url` to `opened`. |
+| `dialog` | `showOpenDialog`, `showSaveDialog`, and `showMessageBox` answer `dialogAnswers.open`, `.save`, and `.message`, and add `{ kind, parent, options }` to `dialogCalls`. |
+| `safeStorage` | A reversible stand-in for encryption, so `secrets` can be tested. It throws while `encryptionAvailable` is `false`. |
+| `app` | An `EventEmitter`, so `app.emit("will-quit")` is Discord quitting, with `getPath(name)` and `getVersion()`. |
+
+A window from the fake is an `EventEmitter` with Electron's window methods (`focus`, `show`, `minimize`, `restore`, `getBounds`, `destroy`, and more) and test helpers:
+
+- `navigate(url)` is the page going to `url`. It emits `will-navigate` on `webContents` with an event the code can `preventDefault`, and when the code doesn't, it sets the URL and emits `did-navigate`. It returns whether the page went.
+- `close()` is the user closing the window. It emits `close`, and unless that is prevented, destroys the window, which emits `closed`.
+- `loaded` lists the URLs given to `loadURL`, `webContents.windowOpenHandler` is the handler the code set for popups, and `options` is what the constructor got.
+
+`fakeElectron` itself controls the fake:
+
+| Member | Does |
+| --- | --- |
+| `addWindow({ url, bounds })` | Adds a window that is already open, such as Discord's own. `url` defaults to `https://discord.com/app`. Set `globalThis.mainWindowId` to its `id` to make it Discord's main window. |
+| `windows` | Every window, destroyed ones too, oldest first. |
+| `fetch` | Answers every session's `fetch` with `(url, init, partition)`. A 404 by default, or the `fetch` option. Set it any time. |
+| `sessions` | Each session made, by partition. |
+| `opened` | Each URL `shell.openExternal` got. |
+| `dialogAnswers`, `dialogCalls` | What each kind of dialog answers next, and each dialog shown. |
+| `encryptionAvailable`, `storageBackend` | What `safeStorage` reports. `true` and `"gnome_libsecret"` by default. |
+| `reset()` | Destroys every window and empties the sessions, links, and dialog calls, and sets the answers back. Call it between tests. |
+
+The options are `fetch`, `userAgent` (each session's starting user agent, a Discord desktop one with Electron and discord tokens by default), and `paths` (what `app.getPath` answers, by name, `/fake/<name>` by default). Only the members above exist. A native side that uses another part of Electron, such as `net`, needs the test to add it: `mock.module("electron", () => ({ ...electron.module, net: { fetch } }))`.
+
+```ts
+test("signs in through the login window", async () => {
+	electron.reset();
+	const signedIn = native.connect();
+	const win = electron.windows.at(-1)!;
+	await electron.sessions.get("persist:music-demo-music")!.cookies.set({ url: "https://music.example.com", name: "session", value: "1" });
+	win.navigate("https://music.example.com/home");
+	expect(await signedIn).toBe(true);
+	expect(win.isDestroyed()).toBe(true);
+});
+```

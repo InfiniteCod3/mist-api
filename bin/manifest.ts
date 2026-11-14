@@ -1,4 +1,4 @@
-/** mist manifest fix: a plugin's manifest.json checked against Evi's store rules, without Discord */
+/** mist manifest fix and bump: a plugin's manifest.json checked against Evi's store rules, and its next version, without Discord */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
@@ -106,27 +106,44 @@ export function fixManifest(input: Manifest, dirName: string, native: boolean): 
 
 export interface FixRun extends Fix { path: string; written: boolean; }
 
-export function fixManifestDir(dir: string, write: boolean): FixRun {
+interface ManifestFile { root: string; path: string; raw: string; manifest: Manifest; native: boolean; }
+
+function readManifest(dir: string): ManifestFile {
     const root = resolve(dir);
     const path = join(root, "manifest.json");
     if (!existsSync(path)) throw new CdpError(`No manifest.json in ${root}`);
+    const raw = readFileSync(path, "utf8");
     let manifest: Manifest;
     try {
-        manifest = JSON.parse(readFileSync(path, "utf8"));
+        manifest = JSON.parse(raw);
     } catch (err) {
         throw new CdpError(`${path} isn't JSON: ${(err as Error).message}`);
     }
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new CdpError(`${path} isn't a JSON object`);
     // scripts/build.ts findEntry: a native.ts, .tsx, .js or .jsx next to the manifest is the native side
     const native = ["ts", "tsx", "js", "jsx"].some(ext => existsSync(join(root, `native.${ext}`)));
+    return { root, path, raw, manifest, native };
+}
+
+/** `value` as JSON written the way `raw` is: its line endings, its indentation, its final newline or none */
+export function formatLike(raw: string, value: unknown): string {
+    const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+    const indent = /^[{[][^\S\r\n]*\r?\n([ \t]+)\S/.exec(raw.trimStart())?.[1] ?? 4;
+    const final = /\r?\n$/.test(raw) ? eol : "";
+    return JSON.stringify(value, null, indent).replace(/\n/g, eol) + final;
+}
+
+export function fixManifestDir(dir: string, write: boolean): FixRun {
+    const { root, path, raw, manifest, native } = readManifest(dir);
     const fix = fixManifest(manifest, basename(root), native);
     const changed = !fix.over && (fix.missing.length > 0 || fix.trimmed.length > 0);
-    if (write && changed) writeFileSync(path, JSON.stringify(fix.manifest, null, 4) + "\n");
+    if (write && changed) writeFileSync(path, formatLike(raw, fix.manifest));
     return { ...fix, path, written: write && changed };
 }
 
+const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
+
 export function fixLines(r: FixRun): string[] {
-    const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
     const did = r.written ? "" : "would ";
     const out = [`${r.path}: built, ${kb(r.bytes.before)} of Evi's ${kb(MAX_BYTES)}`];
     if (!r.missing.length) out.push("Every language Evi ships has its name, description and this version's notes.");
@@ -134,5 +151,81 @@ export function fixLines(r: FixRun): string[] {
     if (r.trimmed.length) out.push(`Over the limit: ${did}drop the other languages' notes for ${r.trimmed.join(", ")} (English ones stay), to ${kb(r.bytes.after)}`);
     if (r.over) out.push(`${r.over} bytes over even with every old translated note gone, so nothing is dropped and nothing written: shorten the English changelog or this version's translations.`);
     else if (!r.written && (r.missing.length || r.trimmed.length)) out.push("Nothing written: run with --write to change manifest.json.");
+    return out;
+}
+
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/** The version after `current`: "patch", "minor" or "major" counts up (dropping a prerelease tag), anything else must be a higher semver */
+export function nextVersion(current: string | undefined, target: string): string {
+    const core = current && /^(\d+)\.(\d+)\.(\d+)/.exec(current);
+    const step = ["major", "minor", "patch"].indexOf(target);
+    if (step >= 0) {
+        if (!core) throw new CdpError(`manifest.json has no version to count up from: give the new version, as in 1.0.0`);
+        const parts = core.slice(1).map(Number);
+        parts[step]++;
+        parts.fill(0, step + 1);
+        return parts.join(".");
+    }
+    if (!SEMVER.test(target)) throw new CdpError(`${target} isn't a version: give patch, minor, major, or a version such as 1.2.3`);
+    if (current && compareVersions(target, current) <= 0) throw new CdpError(`${target} isn't higher than the current version ${current}`);
+    return target;
+}
+
+export interface Bump extends Fix {
+    from: string | null;
+    to: string;
+    /** Languages that got a copy of the English notes, for want of their own `--note-<lang>` */
+    copied: string[];
+}
+
+/**
+ * Sets the version and adds its changelog entry: `notes.en` in English, and for each language Evi
+ * ships its own `notes[lang]` or a copy of the English notes. Then fills other gaps and fits the
+ * 16 KB as `fixManifest` does.
+ */
+export function bumpManifest(input: Manifest, target: string, notes: Record<string, string[]>, dirName: string, native: boolean): Bump {
+    const english = notes.en ?? [];
+    if (!english.length || !english.every(text)) throw new CdpError(`mist manifest bump needs the English notes: --note "What changed"`);
+    for (const [lang, list] of Object.entries(notes)) {
+        if (lang !== "en" && !(LANGUAGES as readonly string[]).includes(lang)) throw new CdpError(`--note-${lang}: Evi's store languages are ${LANGUAGES.join(", ")}`);
+        if (!list.every(text)) throw new CdpError(`--note${lang === "en" ? "" : `-${lang}`} needs text`);
+    }
+    const from = typeof input.version === "string" ? input.version : null;
+    const to = nextVersion(from ?? undefined, target);
+    const manifest: Manifest = structuredClone(input);
+    const changelog = Array.isArray(manifest.changelog) ? manifest.changelog : [];
+    if (changelog.some(c => c?.version === to)) throw new CdpError(`The changelog already has an entry for ${to}`);
+    manifest.version = to;
+    manifest.changelog = [{ version: to, notes: [...english] }, ...changelog];
+    const copied: string[] = [];
+    for (const lang of LANGUAGES) {
+        const locale = (manifest.locales ??= {})[lang] ??= {};
+        if (!notes[lang]) copied.push(lang);
+        // Newest first, as the English changelog is
+        locale.changelog = { [to]: [...notes[lang] ?? english], ...locale.changelog };
+    }
+    return { ...fixManifest(manifest, dirName, native), from, to, copied };
+}
+
+export interface BumpRun extends Bump { path: string; written: boolean; }
+
+export function bumpManifestDir(dir: string, target: string, notes: Record<string, string[]>, write: boolean): BumpRun {
+    const { root, path, raw, manifest, native } = readManifest(dir);
+    const bump = bumpManifest(manifest, target, notes, basename(root), native);
+    const written = write && !bump.over;
+    if (written) writeFileSync(path, formatLike(raw, bump.manifest));
+    return { ...bump, path, written };
+}
+
+export function bumpLines(r: BumpRun): string[] {
+    const be = r.written ? "" : "would be ";
+    const out = [`${r.path}: ${r.from ?? "no version"} -> ${r.to}`];
+    if (r.copied.length) out.push(`English notes ${be}copied to ${r.copied.join(", ")}. Translate them before uploading.`);
+    if (r.missing.length) out.push(`Also missing, ${be}filled with the English text: ${r.missing.join(", ")}`);
+    if (r.trimmed.length) out.push(`Over the limit: the other languages' notes for ${r.trimmed.join(", ")} ${be || "are "}dropped (English ones stay)`);
+    if (r.over) out.push(`${r.over} bytes over Evi's ${kb(MAX_BYTES)} even with every old translated note gone, so nothing is written: shorten the notes.`);
+    else out.push(`Built, ${kb(r.bytes.after)} of Evi's ${kb(MAX_BYTES)}`);
+    if (!r.written && !r.over) out.push("Nothing written: run with --write to change manifest.json.");
     return out;
 }

@@ -6,12 +6,13 @@
 - Observable state that `useStore`, `subscribe` and the `useValue` hook read.
 - A host, a mount point that keeps working across hot reloads.
 - Registries for chat bar buttons, message hover bar buttons, UI under messages, and listeners that run before a message is sent or edited.
+- Settings-panel pieces that look like Discord's: a button, a tooltip, a card, a row, and a callout.
 
 ```ts
-import { accessories, Boundary, boundary, ChatBarButton, chatBar, host, messages, popover, state, useValue } from "@aurologic/mist-api/ui";
+import { accessories, Boundary, boundary, Button, Callout, Card, ChatBarButton, chatBar, host, messages, popover, Row, state, Tip, useValue } from "@aurologic/mist-api/ui";
 ```
 
-The boundary, the state and the host work without `mist.define`. The registries need the plugin's `mist`, after `mist.define`, and source patches, which a plugin adds to its `patches`.
+The boundary, the state, the host and the settings pieces work without `mist.define`. The registries need the plugin's `mist`, after `mist.define`, and source patches, which a plugin adds to its `patches`.
 
 ## A plugin with a chat bar button
 
@@ -253,6 +254,52 @@ A listener that throws is logged once through its plugin's log, and the message 
 With no listeners, the patched code goes on at once, so a plain message isn't delayed.
 
 These listeners see messages typed in the chat box and edits saved in Discord's editor. They don't see messages that other code sends through Discord's API, such as other plugins.
+
+## Settings pieces
+
+```ts
+function Button(props: {
+	children?: ReactNode;
+	onClick?(event: MouseEvent<HTMLButtonElement>): void;
+	variant?: "primary" | "secondary" | "danger" | "link";
+	size?: "small" | "medium" | "large";
+	disabled?: boolean;
+	busy?: boolean;
+	label?: string;
+	type?: "button" | "submit";
+}): ReactElement;
+function Tip(props: { text: string; position?: "top" | "bottom" | "left" | "right"; children: ReactElement; }): ReactElement;
+function Card(props: { children?: ReactNode; }): ReactElement;
+function Row(props: { title: ReactNode; description?: ReactNode; actions?: ReactNode; children?: ReactNode; }): ReactElement;
+function Callout(props: { tone?: "info" | "warning" | "danger" | "success"; title?: ReactNode; children?: ReactNode; }): ReactElement;
+```
+
+Pieces for a plugin's `settingsPanel` that look like Discord's settings, and keep working when Discord renames one of its components.
+
+- `Button` renders Discord's own button through Evi's `Components.Button` when Evi finds it, with Discord's colour for the `variant` (default `"secondary"`) and its `size` (default `"small"`). Without it, it renders a plain `<button>` styled like Discord's. A `"link"` button is always the plain one, styled as a link. `busy` disables the button and sets `aria-busy`, and Discord's button shows its spinner. `label` is the accessible name, for a button whose text doesn't say what it does.
+- `Tip` shows `text` in Discord's tooltip, through Evi's `Components.Tooltip`, when the pointer or focus is on `children`. Without it, it sets `children`'s `title` attribute, so `children` must be one element that takes a `title`, such as a `<span>` or a `<button>`.
+- `Card` groups content on Discord's raised background, with a border.
+- `Row` is a settings row: `title` and `description` on the left, `actions` on the right, and `children` under it across the full width.
+- `Callout` is a coloured note with `role="note"`, in Discord's colour for its `tone` (default `"info"`), with an optional `title`.
+
+The styled pieces share one stylesheet. It is added to the page when the first one mounts, and removed when the last one unmounts, also across plugins that bundle different copies of mist-api. It uses Discord's CSS variables, with fallbacks, so it follows Discord's light and dark themes. Every class name starts with `mist-`.
+
+```tsx
+function Settings() {
+	const [busy, setBusy] = React.useState(false);
+	const signedIn = useValue(account) !== null;
+	return (
+		<Card>
+			<Row
+				title="Weather service"
+				description={signedIn ? "Signed in" : "Sign in to see the forecast in your status."}
+				actions={<Button variant={signedIn ? "secondary" : "primary"} busy={busy} onClick={async () => { setBusy(true); await toggleLogin(); setBusy(false); }}>{signedIn ? "Sign out" : "Sign in"}</Button>}
+			/>
+			{!signedIn && <Callout tone="warning">The forecast stays empty until you sign in.</Callout>}
+		</Card>
+	);
+}
+```
 
 ## Shared state and versions
 

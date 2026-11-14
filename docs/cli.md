@@ -24,7 +24,7 @@ Node strips TypeScript types only for files outside `node_modules`, so the sourc
 
 ## Connect
 
-Every command except `restart` and `manifest fix` connects the same way:
+Every command except `restart` and `manifest` connects the same way. `restart --wait` connects this way after the restart:
 
 1. It reads `http://127.0.0.1:<port>/json/list` and gives up after 5 seconds.
 2. It keeps the targets that are pages on `discord.com` or a subdomain, with `/app` and `/channels` pages first.
@@ -55,8 +55,9 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | `module <id|text> [--diff]` | Prints a webpack module's source as Evi's patches left it, or its diff against Discord's original. |
 | `react <selector>` | Prints the React components that render an element, with their props, and marks the ones Evi hooked. |
 | `manifest fix [dir]` | Checks a plugin's `manifest.json` for missing translations and Evi's 16 KB limit. With `--write`, fixes it. |
+| `manifest bump [dir] <version>` | Sets the next version and adds its changelog entry in every language. With `--write`, writes it. |
 | `leaks <id> --yes` | Turns a dev build off and on, and prints the counts that grew with every cycle. |
-| `restart` | Restarts Discord with `--remote-debugging-port`. |
+| `restart [--wait <id>]` | Restarts Discord with `--remote-debugging-port`. With `--wait`, waits until a plugin runs. |
 
 ## Options
 
@@ -70,7 +71,11 @@ If nothing answers, the error is `Nothing answers on 127.0.0.1:9222. Start Disco
 | `--depth <n>` | `4`, `10` | How many ancestors `inspect` prints (4), and how many components `react` prints (10). |
 | `--all` | off | `inspect` prints every match, not only the first. `perf` prints every site of each plugin, not the 5 slowest. |
 | `--diff` | off | `module` prints the patches' changes instead of the whole source. |
-| `--write` | off | `manifest fix` writes its fixes to `manifest.json`. |
+| `--write` | off | `manifest fix` and `manifest bump` write `manifest.json`. |
+| `--note <text>` | none | An English note for the version `manifest bump` adds. Repeat it for more notes. |
+| `--note-<lang> <text>` | a copy of the English | That language's note for the version `manifest bump` adds, as in `--note-de`. Repeat it for more notes. |
+| `--wait <id>` | none | `restart` waits until that plugin's page side runs. |
+| `--timeout <s>` | `60` | How many seconds `restart --wait` waits. |
 | `--cycles <n>` | `3` | How many times `leaks` turns the plugin off and on, from 1 to 50. |
 | `--yes` | off | `leaks` runs. Without it, `leaks` only checks that it may. |
 | `--dry-run` | off | `restart` prints what it would run. |
@@ -369,7 +374,20 @@ Reads `manifest.json` in the folder, or in the current folder, and checks it aga
 - Translations. Every language Evi ships besides English (`de`, `es`, `fr`, `ja`, `pl`, `pt-BR`, `ru`, `tr`) needs `name`, `description` when the English one isn't empty, and notes for the current version in `locales.<language>`, as Evi's upload check asks. An empty list of notes counts as missing, and an entry for the current version in the English `changelog` asks for notes even when its own list is empty. `manifest fix` lists each one that is missing. With `--write`, it adds each as a copy of the English text. Translate them before you upload. The check of the code's `defineStrings` tables isn't part of this command: `bun run preview-plugin` in Evi runs it.
 - Size. Evi's plugin CLI refuses to upload a built `manifest.json` over 16 KB (16384 bytes). `manifest fix` measures the manifest as Evi's build writes it, with `main` and, when there is a `native.ts`, `native` added. When it is over, `manifest fix` drops the other languages' notes for the oldest versions, oldest first, until it fits. Versions are ordered as semver, so a prerelease such as `1.1.0-beta.2` is older than `1.1.0`. English notes stay, and a language without notes for a version shows the English ones. The current version's notes are never dropped. If the manifest would still be over with every old translated note gone, `manifest fix` drops nothing, writes nothing, even with `--write`, and says by how many bytes it is over.
 
-Without `--write`, it changes nothing and says what it would do. `--write` writes `manifest.json` with four-space indentation.
+Without `--write`, it changes nothing and says what it would do. `--write` keeps the file's line endings (CRLF or LF), its indentation, its key order, and its final newline or the lack of one.
+
+## manifest bump
+
+```sh
+mist manifest bump patch --note "Fixed the forecast for places without a region."
+mist manifest bump plugins/weather-demo 1.4.0 --note "Hourly forecasts." --note-de "Stündliche Vorhersagen." --write
+```
+
+Sets the version in `manifest.json`, in the folder or in the current folder, and adds that version's entry at the top of the `changelog`. It doesn't connect to Discord. The version is `patch`, `minor` or `major`, which counts up from the current version and drops a prerelease tag, or a semver such as `1.4.0` or `2.0.0-beta.1`. It must be higher than the current version, and the `changelog` must not have an entry for it yet. `--note` gives the English notes and is required. Each language Evi ships besides English gets the notes from its `--note-<lang>`, or a copy of the English notes, put first in `locales.<language>.changelog`. A language outside Evi's list is refused.
+
+Then `manifest bump` does what `manifest fix --write` does: it fills each missing name and description with the English text and drops old translated notes until the built manifest fits in 16 KB. It prints the old and the new version, the languages that got a copy of the English notes, and the built size. When even dropping every old translated note leaves it over 16 KB, it writes nothing and says by how much.
+
+Without `--write`, it changes nothing and says what it would do. `--write` keeps the file's line endings, indentation and key order, as `manifest fix` does.
 
 ## leaks
 
@@ -401,9 +419,12 @@ It prints each count against the first, and `LEAK?` for each count that rose aft
 ```sh
 mist restart
 mist restart --port 9333 --dry-run
+mist restart --wait weather-demo --timeout 90
 ```
 
 On Windows, `restart` runs `taskkill /IM Discord.exe /F`, which closes Discord without letting it save. After 1.5 seconds, it starts Discord through `%LOCALAPPDATA%\Discord\Update.exe --processStart Discord.exe --process-start-args --remote-debugging-port=<port>`. It fails if `Update.exe` isn't there. With `--dry-run`, it prints both commands and runs neither.
+
+With `--wait <id>`, `restart` then reads `Mist.status()` once a second, as `mist status` does, until that plugin reports `running`, or until `--timeout` seconds pass (60 by default). While Discord starts, nothing answers on the port, and that counts as not running yet. It prints one line, as in `weather-demo is running, 8.2 s after the restart`. On a timeout, the line says what it saw last, such as `weather-demo is stopped` or a start error, and `mist` exits with code 1. `--dry-run` doesn't wait. On macOS and Linux, it waits while you run the printed command.
 
 On macOS and Linux, `restart` runs nothing. It prints the command to run instead:
 

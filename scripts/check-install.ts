@@ -32,12 +32,12 @@ try {
 import type { SettingsSchema } from "@evi/api";
 import { createMist, MIST_VERSION } from "${name}";
 import { channel, slot } from "${name}/bus";
-import { accounts, DiscordApiError, discord, format, PluginPermissionError } from "${name}/discord";
-import { defineNative } from "${name}/native";
+import { accounts, DiscordApiError, discord, format, parseMessageLink, PluginPermissionError, type SwitchResult } from "${name}/discord";
+import { check, defineNative, loginWindow, openExternal, privateSession } from "${name}/native";
 import { type ChangeSource, currentUserId, stores, subscribe, useStore } from "${name}/stores";
-import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
-import { boundary, chatBar, messages, state, useValue } from "${name}/ui";
-import { fetchJson, isRecord, sleep } from "${name}/util";
+import { fakeContext, fakeElectron, fakeEvi, fakeStore } from "${name}/testing";
+import { boundary, Button, Callout, Card, chatBar, messages, Row, state, Tip, useValue } from "${name}/ui";
+import { backoff, fetchJson, isRecord, keepConnected, limit, parseSse, sseEvents, shared, sleep, ttlCache } from "${name}/util";
 
 const native = defineNative({ add: (a: number, b: number) => a + b });
 const settings = { volume: { type: "number", label: "Volume", default: 50 } } satisfies SettingsSchema;
@@ -63,7 +63,13 @@ export async function run() {
     // @ts-expect-error discord() takes the plugin's mist object, not an id
     discord("check");
     const when: string = format.ago(Date.now());
+    const switched: SwitchResult = await accounts.switchTo("1");
+    const saved: "saved" | "unchanged" | "failed" = await api.status.set({ text: "Listening" });
+    const link: string | undefined = parseMessageLink(format.messageLink(null, "1", "2"))?.messageId;
+    const cache = ttlCache<string, number>({ ttlMs: 1000 });
+    const once = shared(async () => 1);
     void [sum, volume, text, source, channel, slot, currentUserId, useStore, MIST_VERSION, fetchJson, isRecord, sleep, accounts, DiscordApiError, PluginPermissionError, me, when, boundary, useValue, chatBar.patches];
+    void [switched, saved, link, cache, once, backoff, keepConnected, limit, parseSse, sseEvents, check, loginWindow, openExternal, privateSession, Button, Callout, Card, Row, Tip];
 }
 export function test() {
     const evi = fakeEvi();
@@ -96,19 +102,21 @@ export function test() {
     let tested: string;
     try {
         tested = execFileSync("node", ["--input-type=module", "-e", `
-import { fakeContext, fakeEvi, fakeStore } from "${name}/testing";
+import { fakeContext, fakeElectron, fakeEvi, fakeStore } from "${name}/testing";
 const evi = fakeEvi();
 const run = fakeContext({ settings: { volume: 3 }, evi });
 const store = fakeStore({ n: 1 });
 run.ctx.waitFor(evi.module.filters.byStoreName("NStore"), s => run.ctx.logger.info("found", s.n));
 evi.addStore("NStore", store);
 run.dispose();
-console.log(JSON.stringify([run.ctx.settings.get("volume"), run.logs[0].args]));
+const electron = fakeElectron();
+electron.addWindow();
+console.log(JSON.stringify([run.ctx.settings.get("volume"), run.logs[0].args, electron.module.BrowserWindow.getAllWindows().length]));
 `], { cwd: app, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     } catch (err) {
         tested = String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => line.startsWith("Error")) ?? String(err);
     }
-    if (tested !== '[3,["found",1]]') problems.push(`the testing subpath under Node printed ${tested}`);
+    if (tested !== '[3,["found",1],1]') problems.push(`the testing subpath under Node printed ${tested}`);
 
     // A plugin's native tests often mock electron with only what they use, as here with only net
     mkdirSync(join(app, "node_modules", "electron"), { recursive: true });

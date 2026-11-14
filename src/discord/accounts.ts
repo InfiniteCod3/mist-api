@@ -139,7 +139,23 @@ function unfollow() {
     Dispatcher.unsubscribe("CONNECTION_OPEN", onAction);
 }
 
-type SwitchFn = (id: string) => unknown;
+type SwitchFn = (id: string, synchronously?: boolean) => unknown;
+
+/** What Discord answered a switch: "already" when it was signed in as that account, "needsLogin" when it has no login saved for it */
+export type SwitchResult = "switched" | "already" | "needsLogin" | "failed";
+
+export interface SwitchOptions {
+    /** Passed to Discord as its own `switchSynchronously` argument. Left out, Discord does what its menu does. */
+    synchronously?: boolean;
+}
+
+/** Work for one signed-in account. May return a cleanup, which runs when the account leaves. */
+export type AccountRun = (accountId: string, signal: AbortSignal) => void | (() => void) | Promise<void | (() => void)>;
+
+export interface ScopeOptions {
+    /** How long after Discord connects to wait before `run`, for its stores to fill. Not waited when it is connected already. Default 0 */
+    settleMs?: number;
+}
 
 export const accounts = {
     /** The saved accounts in Discord's order. Empty while Discord hasn't made its store. */
@@ -177,15 +193,88 @@ export const accounts = {
     },
 
     /**
-     * Switches to a saved account with Discord's own switch, as its Switch Accounts menu does. Resolves
-     * when Discord has taken the account's login, before it connects: await `whenConnected()` for that.
+     * Switches to a saved account with Discord's own switch, as its Switch Accounts menu does, and says
+     * how it went. Resolves when Discord has taken the account's login, before it connects: await
+     * `whenConnected()` for that. On "needsLogin", `openLogin()` lets the user sign in again.
      */
-    async switchTo(id: string): Promise<void> {
+    async switchTo(id: string, { synchronously }: SwitchOptions = {}): Promise<SwitchResult> {
         if (!isId(id)) throw new TypeError(`An account id is a Discord id, got ${JSON.stringify(id)}`);
         const discordSwitch = find<SwitchFn>(filters.byCode("Switching account to", "MULTI_ACCOUNT_SWITCH_START"));
         if (typeof discordSwitch !== "function") throw new Error("Discord's account switch isn't available");
-        if (signedIn() === id) return;
-        await discordSwitch(id);
+        if (signedIn() === id) return "already";
+        try {
+            // Discord's switchAccountToken resolves true or false, and undefined when it has no token saved for the account
+            const answer = await (synchronously === undefined ? discordSwitch(id) : discordSwitch(id, synchronously));
+            return answer === true ? "switched" : answer === undefined ? "needsLogin" : "failed";
+        } catch {
+            return "failed";
+        }
+    },
+
+    /** Opens Discord's own "add an account" login, as its Switch Accounts menu does. False when Discord's function isn't there. */
+    openLogin(): boolean {
+        const login = find<() => void>(filters.byCode("onBackPressed:", "LOGIN_RESET"));
+        if (typeof login !== "function") return false;
+        login();
+        return true;
+    },
+
+    /**
+     * Runs `run(accountId, signal)` for each account Discord connects as: at once when it is connected
+     * already, else `settleMs` after it connects. When the account switches or signs out, the signal
+     * aborts and the cleanup `run` returned is called. An error from `run` or its cleanup is reported,
+     * not thrown into Discord's dispatch. Returns the stop, which also ends the current run; it can go
+     * to `ctx.onDispose`.
+     */
+    scope(run: AccountRun, { settleMs = 0 }: ScopeOptions = {}): () => void {
+        if (typeof run !== "function") throw new TypeError("accounts.scope takes a function to run for each account");
+        let current: { id: string; controller: AbortController; timer?: ReturnType<typeof setTimeout>; cleanup?: () => void; } | undefined;
+        const cleanUp = (cleanup: () => void) => {
+            try { cleanup(); } catch (err) { reportError(err); }
+        };
+        const begin = (state: NonNullable<typeof current>) => {
+            const keep = (result: unknown) => {
+                if (typeof result !== "function") return;
+                if (state.controller.signal.aborted) cleanUp(result as () => void);
+                else state.cleanup = result as () => void;
+            };
+            try {
+                const result = run(state.id, state.controller.signal);
+                if (result instanceof Promise) result.then(keep, reportError);
+                else keep(result);
+            } catch (err) {
+                reportError(err);
+            }
+        };
+        const start = (id: string, delay: number) => {
+            const state: NonNullable<typeof current> = { id, controller: new AbortController() };
+            current = state;
+            if (delay > 0) state.timer = setTimeout(() => begin(state), delay);
+            else begin(state);
+        };
+        const end = () => {
+            const state = current;
+            current = undefined;
+            if (!state) return;
+            clearTimeout(state.timer);
+            state.controller.abort(new Error(`Account ${state.id} left`));
+            if (state.cleanup) cleanUp(state.cleanup);
+        };
+        const offs = [
+            accounts.on("connected", ({ id }) => {
+                if (current?.id === id) return;
+                end();
+                start(id, settleMs);
+            }),
+            accounts.on("switching", end),
+            accounts.on("signedOut", end),
+        ];
+        const now = signedIn();
+        if (now) start(now, 0);
+        return () => {
+            for (const off of offs.splice(0)) off();
+            end();
+        };
     },
 };
 

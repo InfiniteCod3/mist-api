@@ -40,24 +40,27 @@ async function rejection(pending: Promise<unknown>) {
 
 test("discordWindow takes Discord's main window id when it shows the app, and otherwise the first window showing the app", () => {
     const global = globalThis as { mainWindowId?: number; };
-    electron.windows = [
-        { id: 1, url: "file:///splash/index.html" },
-        { id: 2, url: "https://discord.com/overlay" },
-        { id: 3, url: "https://discord.com/popout" },
-        { id: 4, url: "https://canary.discord.com/channels/@me", destroyed: true },
-        { id: 5, url: "https://ptb.discord.com/channels/@me" },
-        { id: 6, url: "https://discord.com/app" },
-    ];
+    electron.reset();
+    const [, overlay, , gone, ptb, app] = [
+        "file:///splash/index.html",
+        "https://discord.com/overlay",
+        "https://discord.com/popout",
+        "https://canary.discord.com/channels/@me",
+        "https://ptb.discord.com/channels/@me",
+        "https://discord.com/app",
+    ].map(url => electron.addWindow({ url }));
+    gone.destroy();
     delete global.mainWindowId;
-    expect(discordWindow()?.id).toBe(5);
-    global.mainWindowId = 6;
-    expect(discordWindow()?.id).toBe(6);
-    global.mainWindowId = 2;
-    expect(discordWindow()?.id).toBe(5);
-    electron.windows = electron.windows.filter(w => w.id < 5);
+    expect(discordWindow()?.id).toBe(ptb.id);
+    global.mainWindowId = app.id;
+    expect(discordWindow()?.id).toBe(app.id);
+    global.mainWindowId = overlay.id;
+    expect(discordWindow()?.id).toBe(ptb.id);
+    ptb.destroy();
+    app.destroy();
     expect(discordWindow()).toBeUndefined();
     delete global.mainWindowId;
-    electron.windows = [];
+    electron.reset();
 });
 
 test("a lifetime clears its timers, destroys its windows and aborts its signal when the native side stops, and refuses use after", async () => {
@@ -240,7 +243,7 @@ test("helpers for one file in a native run share it, so two of them don't overwr
 });
 
 test("when Discord quits, pending writes are flushed and lifetime children killed; a stopped run's quit listeners are gone", async () => {
-    const listeners = () => [electron.app.listenerCount("will-quit"), process.listenerCount("exit")];
+    const listeners = () => [electron.module.app.listenerCount("will-quit"), process.listenerCount("exit")];
     const before = listeners();
     const { ctx, dispose } = nativeContext("t-quit");
     const prefs = jsonFile(ctx, "prefs", { initial: 0, debounceMs: 60_000 });
@@ -252,7 +255,7 @@ test("when Discord quits, pending writes are flushed and lifetime children kille
     child.once("exit", () => { exited = true; });
     expect(listeners()).toEqual([before[0] + 1, before[1] + 1]);
 
-    electron.app.emit("will-quit");
+    electron.module.app.emit("will-quit");
     expect(JSON.parse(readFileSync(prefs.path, "utf8"))).toBe(5);
     expect(Object.keys(JSON.parse(readFileSync(join(dataFolder(ctx), "mist-secrets.json"), "utf8")))).toEqual(["token"]);
     await waitFor(() => exited);
@@ -285,9 +288,9 @@ test("secrets are stored encrypted in the plugin's folder and read back; they re
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "linux" });
     try {
-        electron.backend = "basic_text";
+        electron.storageBackend = "basic_text";
         expect(again.encrypted).toBe(false);
-        electron.backend = "gnome_libsecret";
+        electron.storageBackend = "gnome_libsecret";
         expect(again.encrypted).toBe(true);
     } finally {
         Object.defineProperty(process, "platform", platform);
@@ -304,27 +307,28 @@ test("secrets are stored encrypted in the plugin's folder and read back; they re
 
 test("path grants hand out opaque handles for what the person picked, resolve only on the native side, and stay inside a folder", async () => {
     const { ctx, dataDir, dispose } = nativeContext("t-grants");
-    electron.windows = [{ id: 9, url: "https://discord.com/app" }];
+    electron.reset();
+    const main = electron.addWindow({ url: "https://discord.com/app" });
     const grants = pathGrants(ctx);
     const picked = join(dataDir, "picked");
 
-    electron.dialogAnswer = { canceled: false, filePaths: [picked] };
+    electron.dialogAnswers.open = { canceled: false, filePaths: [picked] };
     const folder = await grants.pickFolder({ title: "Choose a folder" });
     expect(folder).toMatch(/^grant:[0-9a-f-]{36}$/);
     expect(folder).not.toContain(picked);
-    expect(electron.dialogCalls.at(-1)).toMatchObject({ parent: { id: 9 }, options: { title: "Choose a folder", properties: ["openDirectory"] } });
+    expect(electron.dialogCalls.at(-1)).toMatchObject({ kind: "open", parent: { id: main.id }, options: { title: "Choose a folder", properties: ["openDirectory"] } });
     expect(grants.resolveGrant(folder)).toBe(picked);
     expect(grants.resolveGrant(folder, "notes", "a.txt")).toBe(join(picked, "notes", "a.txt"));
     for (const escape of [[".."], ["notes", "..", "..", "x"], [dataDir]]) {
         expect(() => grants.resolveGrant(folder, ...escape)).toThrow(expect.objectContaining({ code: "outside-grant" }));
     }
 
-    electron.dialogAnswer = { canceled: false, filePaths: [join(picked, "one.txt")] };
+    electron.dialogAnswers.open = { canceled: false, filePaths: [join(picked, "one.txt")] };
     const file = await grants.pickFile();
     expect(electron.dialogCalls.at(-1)?.options.properties).toEqual(["openFile"]);
     expect(() => grants.resolveGrant(file, "x")).toThrow(expect.objectContaining({ code: "outside-grant" }));
 
-    electron.dialogAnswer = { canceled: true, filePaths: [] };
+    electron.dialogAnswers.open = { canceled: true, filePaths: [] };
     expect(await grants.pickFile()).toBeNull();
     for (const forged of [picked, "grant:00000000-0000-0000-0000-000000000000", 42, undefined]) {
         expect(() => grants.resolveGrant(forged)).toThrow(expect.objectContaining({ code: "unknown-grant" }));
@@ -337,5 +341,5 @@ test("path grants hand out opaque handles for what the person picked, resolve on
     expect(later.revokeGrant(file)).toBe(true);
     expect(() => later.resolveGrant(file)).toThrow(expect.objectContaining({ code: "unknown-grant" }));
     restarted.dispose();
-    electron.windows = [];
+    electron.reset();
 });

@@ -1,5 +1,7 @@
 import { I18n } from "@evi/api";
 
+import { messageLink } from "./links.ts";
+
 /** Discord's language tag, as in "en-US" or "pt-BR": the one picked in Discord's Language settings */
 const locale = () => I18n.discordLocale;
 
@@ -103,4 +105,6 @@ export const format = {
         if (Number.isNaN(when.getTime())) return String(when);
         return keep("date", options, tag => new Intl.DateTimeFormat(tag, options)).format(when);
     },
+
+    messageLink,
 };

@@ -1,8 +1,13 @@
 /**
  * `@aurologic/mist-api/testing`: test doubles for a plugin's unit tests, for any test runner. A
- * fake plugin context, a fake Flux store, and a fake `@evi/api` module for the runner's module mock.
+ * fake plugin context, a fake Flux store, and fake `@evi/api` and `electron` modules for the runner's module mock.
  */
 import type { Filter, FluxAction, FluxDispatcher, FoundExport, PluginContext, SettingsSchema, SettingsValues } from "@evi/api";
+
+export {
+    type FakeBrowserWindow, type FakeBrowserWindowClass, type FakeCookie, type FakeCookieDetails, type FakeCookies, fakeElectron, type FakeElectron,
+    type FakeElectronModule, type FakeElectronOptions, type FakeSession, type FakeWebContents, type PermissionCheckHandler, type PermissionRequestHandler, type Rect,
+} from "./fake-electron.ts";
 
 type EviApi = typeof import("@evi/api");
 
@@ -68,6 +73,8 @@ export interface FakeEviModule {
     Dispatcher: FakeDispatcher;
     /** The React passed to fakeEvi, for code that imports React from @evi/api */
     React: EviApi["React"];
+    /** Evi's Components, empty, so mist's Button and Tip render their own fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. */
+    Components: Record<string, unknown>;
 }
 
 export interface FakeEvi {
@@ -144,6 +151,7 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
             I18n: { discordLocale: "en-US" },
             Dispatcher: fakeDispatcher(),
             React: options.React!,
+            Components: {},
         },
     };
     // Not enumerable, so `{ ...evi.module, x }` leaves it out instead of throwing

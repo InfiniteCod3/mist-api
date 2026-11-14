@@ -1,24 +1,15 @@
 /** `@aurologic/mist-api/util`: small helpers that work on the page and on the native side. */
+export { type Backoff, backoff, type BackoffOptions } from "./util/backoff.ts";
+export { keepConnected, type KeepConnectedOptions } from "./util/keep-connected.ts";
+export { limit } from "./util/limit.ts";
+export { shared, sharedByKey } from "./util/shared.ts";
+export { sleep } from "./util/sleep.ts";
+export { parseSse, type SseEvent, sseEvents } from "./util/sse.ts";
+export { type TtlCache, ttlCache, type TtlCacheOptions } from "./util/ttl-cache.ts";
 
 /** A plain object or class instance, not null and not an array */
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** Resolves after `ms`; rejects with the signal's reason if it aborts first */
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(signal.reason);
-        const onAbort = () => {
-            clearTimeout(timer);
-            reject(signal!.reason);
-        };
-        const timer = setTimeout(() => {
-            signal?.removeEventListener("abort", onAbort);
-            resolve();
-        }, ms);
-        signal?.addEventListener("abort", onAbort, { once: true });
-    });
-}
 
 export interface TimedInit extends RequestInit {
     /** Abort after this many ms. Default 10000 */

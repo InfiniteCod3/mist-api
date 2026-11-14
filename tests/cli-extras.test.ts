@@ -6,7 +6,8 @@ import { basename, join } from "node:path";
 
 import { codeOffset, errorLines, type ErrorRecord, parseStack } from "../bin/errors";
 import { growth } from "../bin/leaks";
-import { builtBytes, fixLines, fixManifest, fixManifestDir, LANGUAGES, type Manifest, MAX_BYTES } from "../bin/manifest";
+import { bumpLines, bumpManifest, bumpManifestDir, builtBytes, fixLines, fixManifest, fixManifestDir, LANGUAGES, type Manifest, MAX_BYTES, nextVersion } from "../bin/manifest";
+import { waitForPlugin, waitLine } from "../bin/wait";
 import { diffTokens, tokens } from "../bin/module";
 import { perfLines } from "../bin/perf";
 import { MASKED } from "../src/values";
@@ -258,4 +259,119 @@ test("mist manifest fix drops and writes nothing when even dropping every old tr
     expect(r.over).toBe(builtBytes(allOldDropped, basename(dir), false) - MAX_BYTES);
     expect([r.written, readFileSync(path, "utf8")]).toEqual([false, original]);
     expect(fixLines(r)).toContain(`${r.over} bytes over even with every old translated note gone, so nothing is dropped and nothing written: shorten the English changelog or this version's translations.`);
+});
+
+test("mist manifest bump counts patch, minor and major up, and takes only a higher version", () => {
+    expect(["patch", "minor", "major"].map(t => nextVersion("1.2.3", t))).toEqual(["1.2.4", "1.3.0", "2.0.0"]);
+    expect(nextVersion("1.3.0-beta.2", "patch")).toBe("1.3.1");
+    expect(nextVersion("1.3.0-beta.2", "1.3.0")).toBe("1.3.0");
+    expect(nextVersion(undefined, "0.1.0")).toBe("0.1.0");
+    expect(() => nextVersion("1.2.3", "1.2.3")).toThrow("1.2.3 isn't higher than the current version 1.2.3");
+    expect(() => nextVersion("1.2.3", "1.2.0")).toThrow("isn't higher");
+    expect(() => nextVersion("1.2.3", "1.3")).toThrow("1.3 isn't a version");
+    expect(() => nextVersion(undefined, "patch")).toThrow("no version to count up from");
+});
+
+test("mist manifest bump adds the version's notes first, in English and each language, its own or a copy", () => {
+    const input = manifest({ locales: { de: { name: "Demo", description: "Tut etwas.", changelog: { "1.2.0": ["Neu."] } } } });
+    const bump = bumpManifest(input, "minor", { en: ["Faster.", "Fewer requests."], de: ["Schneller."] }, "demo", false);
+    expect([bump.from, bump.to, bump.manifest.version]).toEqual(["1.2.0", "1.3.0", "1.3.0"]);
+    expect(bump.manifest.changelog![0]).toEqual({ version: "1.3.0", notes: ["Faster.", "Fewer requests."] });
+    expect(bump.manifest.changelog!.slice(1)).toEqual(input.changelog!);
+    expect(bump.manifest.locales!.de.changelog).toEqual({ "1.3.0": ["Schneller."], "1.2.0": ["Neu."] });
+    expect(Object.keys(bump.manifest.locales!.de.changelog!)).toEqual(["1.3.0", "1.2.0"]);
+    expect(bump.manifest.locales!.fr.changelog).toEqual({ "1.3.0": ["Faster.", "Fewer requests."] });
+    expect(bump.copied).toEqual(LANGUAGES.filter(l => l !== "de"));
+    expect(bump.missing).not.toContain("fr 1.3.0 notes");
+    expect(bump.missing).toContain("fr name");
+    expect(input.version).toBe("1.2.0");
+});
+
+test("mist manifest bump refuses no English note, an unknown language and a version the changelog already has", () => {
+    expect(() => bumpManifest(manifest(), "patch", {}, "demo", false)).toThrow("needs the English notes");
+    expect(() => bumpManifest(manifest(), "patch", { en: ["  "] }, "demo", false)).toThrow("needs the English notes");
+    expect(() => bumpManifest(manifest(), "patch", { en: ["New."], xx: ["?"] }, "demo", false)).toThrow("--note-xx: Evi's store languages are");
+    const ahead = manifest({ changelog: [{ version: "1.2.1", notes: ["Soon."] }, { version: "1.2.0", notes: ["New."] }] });
+    expect(() => bumpManifest(ahead, "patch", { en: ["New."] }, "demo", false)).toThrow("already has an entry for 1.2.1");
+});
+
+test("mist manifest bump --write keeps the file's CRLF line endings, indentation and key order; without --write it writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    const path = join(dir, "manifest.json");
+    const original = JSON.stringify({ name: "Demo", version: "1.2.0", id: "demo", description: "Does a thing.", changelog: [{ version: "1.2.0", notes: ["New."] }] }, null, 2).replace(/\n/g, "\r\n") + "\r\n";
+    writeFileSync(path, original);
+
+    const dry = bumpManifestDir(dir, "patch", { en: ["Fixed a crash."] }, false);
+    expect([dry.written, readFileSync(path, "utf8")]).toEqual([false, original]);
+    expect(bumpLines(dry)).toEqual([
+        `${path}: 1.2.0 -> 1.2.1`,
+        `English notes would be copied to ${LANGUAGES.join(", ")}. Translate them before uploading.`,
+        `Also missing, would be filled with the English text: ${dry.missing.join(", ")}`,
+        `Built, ${(dry.bytes.after / 1024).toFixed(1)} KB of Evi's 16.0 KB`,
+        "Nothing written: run with --write to change manifest.json.",
+    ]);
+
+    const run = bumpManifestDir(dir, "patch", { en: ["Fixed a crash."] }, true);
+    const written = readFileSync(path, "utf8");
+    expect(run.written).toBe(true);
+    expect(written.endsWith("}\r\n")).toBe(true);
+    expect(written.replace(/\r\n/g, "")).not.toContain("\n");
+    expect(written.split("\r\n")[1]).toBe(`  "name": "Demo",`);
+    expect(Object.keys(JSON.parse(written))).toEqual(["name", "version", "id", "description", "changelog", "locales"]);
+    expect(JSON.parse(written).version).toBe("1.2.1");
+});
+
+test("mist manifest fix --write keeps an LF file's tab indentation and its missing final newline", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    const path = join(dir, "manifest.json");
+    writeFileSync(path, JSON.stringify(manifest(), null, "\t"));
+    fixManifestDir(dir, true);
+    const written = readFileSync(path, "utf8");
+    expect([written.includes("\r"), written.endsWith("}"), written.split("\n")[1]]).toEqual([false, true, `\t"id": "demo",`]);
+});
+
+test("mist manifest bump writes nothing when the new notes leave the manifest over 16 KB", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    const path = join(dir, "manifest.json");
+    const original = JSON.stringify(manifest(), null, 4);
+    writeFileSync(path, original);
+    const r = bumpManifestDir(dir, "patch", { en: Array.from({ length: 6 }, () => "y".repeat(400)) }, true);
+    expect(r.over).toBeGreaterThan(0);
+    expect([r.written, readFileSync(path, "utf8")]).toEqual([false, original]);
+    expect(bumpLines(r)).toContain(`${r.over} bytes over Evi's 16.0 KB even with every old translated note gone, so nothing is written: shorten the notes.`);
+});
+
+/** A fake debugging port: each connect reads the next of `answers`, a status list, null, or an error */
+function fakePort(answers: (unknown[] | null | Error)[]) {
+    let at = 0, clock = 0, closed = 0;
+    const deps = {
+        now: () => clock,
+        sleep: async (ms: number) => { clock += ms; },
+        connect: async () => {
+            const answer = answers[Math.min(at++, answers.length - 1)];
+            if (answer instanceof Error) throw answer;
+            return { send: async () => answer, on: () => () => { }, close: () => { closed++; } } as any;
+        },
+        evaluate: async <T>(send: (...args: any[]) => Promise<unknown>) => await send() as T,
+    };
+    return { deps, closed: () => closed };
+}
+
+const plugin = (id: string, state: Record<string, unknown>) => ({ id, state });
+
+test("mist restart --wait waits through a Discord that isn't up yet until the plugin runs, closing each connection", async () => {
+    const port = fakePort([new Error("Nothing answers"), null, [plugin("other", { running: true })], [plugin("demo", { running: false })], [plugin("demo", { running: true })]]);
+    const r = await waitForPlugin(9222, "demo", 60_000, port.deps);
+    expect(r).toEqual({ running: true, ms: 4000 });
+    expect(port.closed()).toBe(4);
+    expect(waitLine("demo", r)).toBe("demo is running, 4.0 s after the restart");
+});
+
+test("mist restart --wait gives up at the timeout and says what it saw last", async () => {
+    const port = fakePort([[plugin("demo", { running: false })]]);
+    const r = await waitForPlugin(9222, "demo", 5000, port.deps);
+    expect(r).toEqual({ running: false, ms: 5000, last: "demo is stopped" });
+    expect(waitLine("demo", r)).toBe("demo isn't running after 5.0 s: demo is stopped");
+    const down = await waitForPlugin(9222, "demo", 2000, fakePort([new Error("Nothing answers on 127.0.0.1:9222.")]).deps);
+    expect(down).toEqual({ running: false, ms: 2000, last: "Nothing answers on 127.0.0.1:9222." });
 });

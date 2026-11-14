@@ -249,6 +249,11 @@ function Typing({ channelId }: { channelId: string; }) {
 | `fetch(url, { signal: AbortSignal.timeout(15_000) })` | `fetchWithTimeout(url, { timeout: 15_000 })` |
 | `if (!res.ok) throw new Error("HTTP " + res.status); return res.json();` | `fetchJson(url)`, which throws `HttpError` with the same message |
 | `(window as any).DiscordNative` | `(window as WithDiscordNative).DiscordNative` (types only, see [Util](util.md#discordnative-types)) |
+| `pending ??= load().finally(() => { pending = undefined; })` | `shared(load)`, or `sharedByKey` for one run per key |
+| A retry loop that doubles its wait | `backoff()`, or `keepConnected(connect, { signal })` for a connection to keep up |
+| Splitting an event stream's text on blank lines | `sseEvents(response, signal)` |
+| A `Map` of `{ until, value }` entries trimmed by hand | `ttlCache({ ttlMs, max })` |
+| A queue and a running count | `limit(n)` |
 
 If `native.ts` defines its own `sleep`, delete it and import `sleep` from `@aurologic/mist-api/util`.
 
@@ -322,6 +327,28 @@ mist.events.subscribe(alert => show(alert), { onConnect: refresh });
 ```
 
 The subscription ends when the run is disposed. [Events](events.md) covers ordering, replay for a reloaded page, and restarts.
+
+## Upgrade from mist-api 0.3 to 0.4
+
+One call changed. `accounts.switchTo` resolved with nothing in 0.3, and now resolves with what Discord answered: `"switched"`, `"already"`, `"needsLogin"`, or `"failed"`. Code that ignores the result keeps working. One behaviour changed with it: a switch that Discord refused or that threw used to reject, and now resolves `"failed"`. Replace a `try`/`catch` around it with a check of the result:
+
+```ts
+// 0.3
+try {
+	await accounts.switchTo(id);
+} catch {
+	toast("Couldn't switch");
+}
+
+// 0.4
+const result = await accounts.switchTo(id);
+if (result === "needsLogin") accounts.openLogin();
+else if (result === "failed") toast("Couldn't switch");
+```
+
+It still throws for an id that isn't a Discord id, and when Discord's switch function can't be found.
+
+A hand-written module mock of `electron` in a native side's tests can move to `fakeElectron` from `@aurologic/mist-api/testing`. See [Testing](testing.md#mock-electron).
 
 ## Check the migration
 

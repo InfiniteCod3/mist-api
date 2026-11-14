@@ -1,15 +1,15 @@
 # Discord
 
-`@aurologic/mist-api/discord` reaches the parts of Discord's app that many plugins rebuild for themselves. It covers the saved accounts and account switches, Discord's own API client, Discord's router, avatars, the clipboard, dates and durations in Discord's language, and the message box. It runs on the page side only, because it imports from `@evi/api`.
+`@aurologic/mist-api/discord` reaches the parts of Discord's app that many plugins rebuild for themselves. It covers the saved accounts and account switches, work per account, Discord's own API client, the account's synced settings and custom status, Discord's router, avatars, the clipboard, dates and durations in Discord's language, message links, and the message box. It runs on the page side only, because it imports from `@evi/api`.
 
 ```ts
-import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, UnknownPluginError, whenConnected } from "@aurologic/mist-api/discord";
+import { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, parseMessageLink, PluginPermissionError, UnknownPluginError, whenConnected } from "@aurologic/mist-api/discord";
 
 // After mist.define, which registers the mist object that discord() checks
 const api = discord(mist);
 ```
 
-`discord(mist)` takes the plugin's own mist object, from `createMist`, after `mist.define`, and returns `{ rest, messages }` for that plugin. It must know which plugin is asking, to hold the plugin's requests to its manifest. It checks the object against the handle that mist's page registry holds for its id, and throws a `TypeError` for anything else: a string id, or another object with the plugin's `id`. Otherwise a plugin could name another plugin and borrow its permissions. [Security model](security.md#permissions-through-mist) explains the check.
+`discord(mist)` takes the plugin's own mist object, from `createMist`, after `mist.define`, and returns `{ rest, messages, settings, status }` for that plugin. It must know which plugin is asking, to hold the plugin's requests to its manifest. It checks the object against the handle that mist's page registry holds for its id, and throws a `TypeError` for anything else: a string id, or another object with the plugin's `id`. Otherwise a plugin could name another plugin and borrow its permissions. [Security model](security.md#permissions-through-mist) explains the check.
 
 A plugin's bundle carries only the parts it imports.
 
@@ -23,8 +23,9 @@ Evi holds a plugin to the `permissions` in its `manifest.json`. Evi's [plugin gu
 | `api.rest.get` on message endpoints, such as `/channels/<id>/messages` | `"network": ["discord.com"]` and `"readMessages": true` |
 | `api.rest` to post, edit, or delete messages, or to use interactions, webhooks, or new threads | `"network": ["discord.com"]` and `"sendMessages": true` |
 | `api.rest` to change your account, profile, or settings (`/users/@me...`) | `"network": ["discord.com"]` and `"changeSettings": true` |
+| `api.settings.update`, `api.status.set` | `"network": ["discord.com"]` and `"changeSettings": true` |
 | `api.rest` on any other endpoint | `"network": ["discord.com"]` |
-| `accounts`, `whenConnected`, `navigate`, `avatarUrl`, `copy`, `format`, `chat` | Nothing |
+| `accounts`, `whenConnected`, `api.status.get`, `navigate`, `avatarUrl`, `copy`, `format`, `parseMessageLink`, `chat` | Nothing |
 
 `api.rest` and `api.messages` send requests through Discord's own API client, not the plugin's `fetch`, so Evi's guard doesn't see them. mist holds them to the plugin's declaration by the rules Evi applies to the plugin's own `fetch`:
 
@@ -32,6 +33,7 @@ Evi holds a plugin to the `permissions` in its `manifest.json`. Evi's [plugin gu
 - Every request needs `network` to cover `discord.com`. A listed host covers its subdomains.
 - A `POST`, `PUT`, `PATCH`, or `DELETE` to a message, thread, interaction, or webhook endpoint needs `sendMessages`.
 - A `POST`, `PUT`, `PATCH`, or `DELETE` to `/users/@me`, its settings, profile, consent, or connections needs `changeSettings`.
+- `api.settings.update` and `api.status.set` save through Discord's settings updater, which sends `PATCH /users/@me/settings-proto/<type>`, so they need what that request needs: `network` and `changeSettings`.
 - `api.messages` needs `readMessages`. Evi doesn't check `readMessages` for a `GET`, so mist doesn't check it for `api.rest.get` either. Declare it anyway.
 
 mist reads the path as Discord's API does. It decodes `%`-escapes, so `/users/%40me` is `/users/@me`, and it drops repeated and trailing slashes, the query, and the fragment. A path it can't decode needs every flag. mist reads the declaration from `Evi.plugins` at each request, so it follows an update.
@@ -43,7 +45,7 @@ These checks mirror Evi's guard. They catch what an honest plugin forgot to decl
 Some parts need nothing in `permissions` but still show on the plugin's store page and in its review:
 
 - `copy` writes to the clipboard. The store lists clipboard use, and the review notes `DiscordNative.clipboard`.
-- `accounts.switchTo` changes the account Discord is signed in to. Say so in the plugin's description.
+- `accounts.switchTo` changes the account Discord is signed in to, and `accounts.openLogin` opens Discord's login for another account. Say so in the plugin's description.
 - `chat.localMessage` uses Discord's message actions to show a message that only you see. It sends nothing.
 
 ## accounts
@@ -118,16 +120,59 @@ A plugin that starts during a switch takes the switch from Discord's `MultiAccou
 ### accounts.switchTo
 
 ```ts
-accounts.switchTo(id: string): Promise<void>;
+type SwitchResult = "switched" | "already" | "needsLogin" | "failed";
+
+accounts.switchTo(id: string, options?: { synchronously?: boolean; }): Promise<SwitchResult>;
 ```
 
-Switches to a saved account with Discord's own switch function, the one Discord's Switch Accounts menu calls. It throws a `TypeError` when `id` isn't a Discord id. It throws an `Error` when Discord's switch function can't be found. When `id` is the account Discord is already signed in to, it does nothing.
+Switches to a saved account with Discord's own switch function, the one Discord's Switch Accounts menu calls, and says what Discord answered:
+
+| Result | Means |
+| --- | --- |
+| `"switched"` | Discord took the account's saved login. |
+| `"already"` | Discord is signed in to `id` already. Nothing was called. |
+| `"needsLogin"` | Discord has no login saved for the account, as after it was signed out elsewhere. Call `accounts.openLogin()` to let the user sign in. |
+| `"failed"` | Discord refused the login, or its switch threw. |
+
+`synchronously` is passed to Discord as its own `switchSynchronously` argument. Left out, Discord does what its menu does. It throws a `TypeError` when `id` isn't a Discord id, and an `Error` when Discord's switch function can't be found.
 
 It resolves when Discord has taken the account's login, which is before the account connects. To wait for the connection, await `whenConnected()` next:
 
 ```ts
-await accounts.switchTo(id);
-const now = await whenConnected();
+const result = await accounts.switchTo(id, { synchronously: false });
+if (result === "needsLogin") accounts.openLogin();
+else if (result === "switched") await whenConnected();
+```
+
+### accounts.openLogin
+
+```ts
+accounts.openLogin(): boolean;
+```
+
+Opens Discord's own login for adding an account, the one its Switch Accounts menu opens with Add an Account. Its back button goes to Discord's Switch Accounts list. It returns `false` when Discord's function can't be found.
+
+### accounts.scope
+
+```ts
+type AccountRun = (accountId: string, signal: AbortSignal) => void | (() => void) | Promise<void | (() => void)>;
+
+accounts.scope(run: AccountRun, options?: { settleMs?: number; }): () => void;
+```
+
+Runs work for one account at a time, for plugins that keep per-account state, timers, or listeners. It calls `run(accountId, signal)` for the account Discord is connected as: at once when Discord is connected already, and otherwise when it connects. When the account switches or signs out, `signal` aborts and the cleanup function that `run` returned is called. When Discord connects as the next account, `run` is called again for it. A reconnection to the same account doesn't run it again.
+
+`settleMs` (default 0) waits that long after a connection before `run`, because Discord fills many stores a moment after it connects. It isn't waited when Discord is connected already. A switch during the wait cancels the run.
+
+`run` can be async and resolve with its cleanup. A cleanup that arrives after the account left is called at once. An error that `run` or its cleanup throws, or a rejection, goes to `reportError`, so it shows in the console and isn't thrown into Discord's dispatch. The function `scope` returns stops it and ends the current run, so pass it to `ctx.onDispose`.
+
+```ts
+start(ctx) {
+	ctx.onDispose(accounts.scope((accountId, signal) => {
+		const timer = setInterval(() => void refreshBadges(accountId, signal), 60_000);
+		return () => clearInterval(timer);
+	}, { settleMs: 2000 }));
+},
 ```
 
 ### whenConnected
@@ -272,6 +317,55 @@ for await (const message of api.messages(channelId, { limit: 300 })) {
 }
 ```
 
+## api.settings
+
+```ts
+type SettingsProto = "preloaded" | "frecency";
+type SaveResult = "saved" | "unchanged" | "failed";
+
+api.settings.update(proto: SettingsProto, group: string, change: (value: any) => boolean | void, options?: { timeoutMs?: number; }): Promise<SaveResult>;
+```
+
+Changes the signed-in account's synced settings with Discord's own settings updater, the code Discord's settings pages use, and waits for Discord to confirm that the account saved them. Discord keeps these settings in two protos: `"preloaded"` has most settings, such as `status`, `appearance`, and `privacy`, and `"frecency"` has favourites and recents, such as `favoriteGifs` and `favoriteEmojis`. `group` names one field of the proto, and `change` gets that group's value to edit in place. Its fields are in camel case, as Discord's generated proto code names them.
+
+- When `change` returns `false`, nothing changed: nothing is saved, and the result is `"unchanged"`.
+- Otherwise Discord saves the change at once, as after a click. The result is `"saved"` once Discord dispatches `USER_SETTINGS_PROTO_UPDATE` with `wasSaved` for that proto.
+- The result is `"failed"` when Discord's updater can't be found, reports an error, or doesn't confirm within `timeoutMs` (30000 by default). After a failure it reloads the proto from Discord, so the change isn't kept on this device and saved later.
+
+A proto that isn't one of the two, an empty `group`, or a `change` that isn't a function throws a `TypeError`. It needs `changeSettings`; see [Permissions](#permissions). It writes only to the account Discord is signed in to.
+
+```ts
+const result = await api.settings.update("frecency", "favoriteEmojis", value => {
+	if (value.emojis?.includes("🌧️")) return false;
+	value.emojis = [...value.emojis ?? [], "🌧️"];
+});
+```
+
+## api.status
+
+```ts
+interface CustomStatus {
+	text: string;
+	emojiName?: string;
+	emojiId?: string;
+	expiresAt?: number;
+}
+
+api.status.get(): CustomStatus | null;
+api.status.set(status: CustomStatus | null, options?: { timeoutMs?: number; }): Promise<SaveResult>;
+```
+
+The signed-in account's custom status. `get` reads it from Discord's `UserSettingsProtoStore`, and gives `null` when there is none, or before Discord has loaded the account's settings. `emojiName` is a Unicode emoji or a custom emoji's name, `emojiId` is a custom emoji's id, and `expiresAt` is when the status ends, in milliseconds since 1970. Each is left out when the status has none.
+
+`set` writes a new status with `api.settings.update`, built as Discord's own proto type, or clears it with `null`. It answers `"unchanged"` without saving when the status is already the same. A status needs text, an emoji, or both. Text over 128 characters, an `emojiId` that isn't a Discord id, or an `expiresAt` that isn't a time throws a `TypeError`. It needs `changeSettings`.
+
+```ts
+const before = api.status.get();
+await api.status.set({ text: "Raining in Lisbon", emojiName: "🌧️", expiresAt: Date.now() + 60 * 60_000 });
+// Later
+await api.status.set(before);
+```
+
 ## navigate
 
 ```ts
@@ -335,6 +429,7 @@ format.clock(ms: number): string;
 format.duration(ms: number, options?: DurationOptions): string;
 format.ago(at: number | Date | string, now?: number): string;
 format.date(at: number | Date | string, options?: Intl.DateTimeFormatOptions): string;
+format.messageLink(guildId: string | null, channelId: string, messageId?: string): string;
 ```
 
 Times and dates in Discord's language, the one picked in Discord's Language settings. `toLocaleString()` and `Intl` without a locale use the system's language instead, which can be another language. Each function reads the language when it is called, so it follows a change in Discord's settings. It reads the language from Evi's `I18n.discordLocale`. Formatters are kept per language and options, because making one costs far more than using it.
@@ -357,6 +452,27 @@ Times and dates in Discord's language, the one picked in Discord's Language sett
 const sent = format.date(message.timestamp, { dateStyle: "short", timeStyle: "short" });
 const elapsed = format.clock(Date.now() - startedAt);
 const left = format.duration(endsAt - Date.now());
+```
+
+`messageLink` makes the link that Discord's Copy Message Link makes, `https://discord.com/channels/<server>/<channel>/<message>`, with `@me` for a DM when `guildId` is `null`. Without `messageId` it is the channel's link. An id that isn't a Discord id throws a `TypeError`. The link doesn't depend on the language.
+
+## parseMessageLink
+
+```ts
+interface MessageLink {
+	guildId: string | null;
+	channelId: string;
+	messageId?: string;
+}
+
+function parseMessageLink(text: string): MessageLink | null;
+```
+
+Reads a message or channel link as a user pastes it, and gives `null` for anything else. It takes `discord.com`, `ptb.discord.com`, `canary.discord.com`, and `discordapp.com`, with `https://`, `http://`, or no scheme, a trailing slash, and a query or fragment. Spaces and `<>` around the link are ignored. `guildId` is `null` for a DM's `@me`. The whole text must be the link: a link inside a sentence gives `null`.
+
+```ts
+const target = parseMessageLink(input);
+if (target?.messageId) navigate(`/channels/${target.guildId ?? "@me"}/${target.channelId}/${target.messageId}`);
 ```
 
 ## chat

@@ -16,6 +16,9 @@ export { dataFolder, jsonFile, type JsonFile, type JsonFileOptions } from "./fil
 export { discordWindow } from "./window.ts";
 export { secrets, type Secrets } from "./secrets.ts";
 export { type GrantHandle, type PickOptions, pathGrants, type PathGrants } from "./grants.ts";
+export { type BadArgument, check, type HttpsOptions, type IntOptions, type ListOptions, type TextOptions } from "./check.ts";
+export { privateSession, type PrivateSession, type PrivateSessionOptions } from "./session.ts";
+export { loginWindow, type LoginWindowOptions, openExternal, type OpenExternalOptions } from "./open.ts";
 export type { EventsAnswer } from "./protocol.ts";
 
 /** Anything a native module exports besides start and stop is callable from the page */

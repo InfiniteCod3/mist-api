@@ -10,7 +10,10 @@ import { accessoriesModule, chatBarModule, editModule, load, patch, popoverModul
 import { mistNative } from "./helpers";
 
 const evi = fakeEvi({ React });
-const eviApi = () => ({ ...evi.module, find: () => undefined, filters: { ...evi.module.filters, componentByCode: () => () => false } });
+/** Evi's Components: what each test puts in `discordComponents`, read when a control renders */
+let discordComponents: { Button?: unknown; Tooltip?: unknown; } = {};
+const Components = { get Button() { return discordComponents.Button; }, get Tooltip() { return discordComponents.Tooltip; } };
+const eviApi = () => ({ ...evi.module, Components, find: () => undefined, filters: { ...evi.module.filters, componentByCode: () => () => false } });
 mock.module("@evi/api", eviApi);
 mock.module("mist-test-evi-api", eviApi);
 const ui = await import("../src/ui");
@@ -420,5 +423,104 @@ test("a send listener that never settles holds the message 5 seconds, then it go
         act(() => run.dispose());
     } finally {
         jest.useRealTimers();
+    }
+});
+
+/** A page's head, as far as the stylesheet goes: the style elements in it */
+function fakeDocument() {
+    const head: { textContent: string; dataset: Record<string, string>; remove(): void; }[] = [];
+    const page = globalThis as { document?: unknown; };
+    const before = page.document;
+    page.document = {
+        createElement: () => {
+            const element = { textContent: "", dataset: {}, remove: () => void head.splice(head.indexOf(element), 1) };
+            return element;
+        },
+        head: { append: (element: (typeof head)[number]) => void head.push(element) },
+    };
+    return { head, restore: () => void (page.document = before) };
+}
+
+/** Discord's legacy Button, recording the props it got */
+function discordButton() {
+    const got: Record<string, unknown>[] = [];
+    const Button = Object.assign((props: Record<string, unknown>) => (got.push(props), h("button", null, props.children as React.ReactNode)), {
+        Colors: { BRAND: "brand", PRIMARY: "primary", RED: "red" },
+        Sizes: { SMALL: "small", MEDIUM: "medium", LARGE: "large" },
+    });
+    return { Button, got };
+}
+
+test("Button uses Discord's own button with its colour and size, and a styled plain button without it", () => {
+    const { Button, got } = discordButton();
+    discordComponents = { Button };
+    try {
+        render(h(ui.Button, { variant: "danger", size: "medium", onClick: () => { } }, "Clear"));
+        expect(got[0]).toMatchObject({ color: "red", size: "medium", disabled: false, submitting: false, type: "button", children: "Clear" });
+        render(h(ui.Button, { variant: "primary", busy: true, label: "Saving" }, "Save"));
+        expect(got[1]).toMatchObject({ color: "brand", size: "small", disabled: true, submitting: true, "aria-busy": true, "aria-label": "Saving" });
+        const link = render(h(ui.Button, { variant: "link" }, "Learn more"));
+        expect(link.root.findByType("button").props).toMatchObject({ className: "mist-button", "data-variant": "link" });
+        expect(got).toHaveLength(2);
+    } finally {
+        discordComponents = {};
+    }
+
+    let clicks = 0;
+    const plain = render(h(ui.Button, { onClick: () => void clicks++ }, "Connect"));
+    const button = plain.root.findByType("button");
+    expect(button.props).toMatchObject({ type: "button", className: "mist-button", "data-variant": "secondary", "data-size": "small", disabled: false });
+    act(() => button.props.onClick());
+    expect(clicks).toBe(1);
+    expect(render(h(ui.Button, { busy: true }, "Wait")).root.findByType("button").props).toMatchObject({ disabled: true, "aria-busy": true });
+});
+
+test("Tip uses Discord's tooltip, and a title attribute without it", () => {
+    const tips: unknown[] = [];
+    discordComponents = { Tooltip: (props: { text: string; position?: string; children: React.ReactNode; }) => (tips.push([props.text, props.position]), props.children) };
+    try {
+        const root = render(h(ui.Tip, { text: "Opens in your browser", position: "bottom", children: h("span", null, "?") }));
+        expect(tips).toEqual([["Opens in your browser", "bottom"]]);
+        expect(root.root.findByType("span").props.title).toBeUndefined();
+    } finally {
+        discordComponents = {};
+    }
+    const root = render(h(ui.Tip, { text: "Opens in your browser", children: h("span", null, "?") }));
+    expect(root.root.findByType("span").props.title).toBe("Opens in your browser");
+});
+
+test("Row lays out a title, a description and actions; Card and Callout wrap their content", () => {
+    const row = render(h(ui.Card, null, h(ui.Row, { title: "Weather service", description: "Signed in as rain", actions: h(ui.Button, null, "Sign out") }, h("i", null, "more"))));
+    expect(text(row)).toBe("Weather serviceSigned in as rainSign outmore");
+    expect(row.root.findByProps({ className: "mist-card" })).toBeTruthy();
+    expect(row.root.findByProps({ className: "mist-row-actions" })).toBeTruthy();
+    expect(render(h(ui.Row, { title: "Bare" })).root.findAllByProps({ className: "mist-row-description" })).toHaveLength(0);
+
+    const callout = render(h(ui.Callout, { tone: "warning", title: "Heads up" }, "The service is slow today."));
+    expect(callout.root.findByProps({ role: "note" }).props["data-tone"]).toBe("warning");
+    expect(text(callout)).toBe("Heads upThe service is slow today.");
+    expect(render(h(ui.Callout, null, "x")).root.findByProps({ role: "note" }).props["data-tone"]).toBe("info");
+});
+
+test("the stylesheet is added once, however many pieces are mounted, and removed when the last one unmounts", () => {
+    const page = fakeDocument();
+    try {
+        let a!: ReactTestRenderer, b!: ReactTestRenderer;
+        act(() => { a = create(h(ui.Card, null, h(ui.Button, null, "x"))); });
+        act(() => { b = create(h(ui.Callout, null, "y")); });
+        expect(page.head).toHaveLength(1);
+        expect(page.head[0].dataset.mist).toBe("ui");
+        expect(page.head[0].textContent).toContain(".mist-button");
+        expect(page.head[0].textContent).toContain("var(--");
+        act(() => a.unmount());
+        expect(page.head).toHaveLength(1);
+        act(() => b.unmount());
+        expect(page.head).toHaveLength(0);
+        act(() => { a = create(h(ui.Row, { title: "again" })); });
+        expect(page.head).toHaveLength(1);
+        act(() => a.unmount());
+        expect(page.head).toHaveLength(0);
+    } finally {
+        page.restore();
     }
 });

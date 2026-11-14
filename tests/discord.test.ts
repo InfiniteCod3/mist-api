@@ -32,9 +32,11 @@ mock.module("@evi/api", () => ({
     },
     find: (filter: (v: unknown) => boolean) => exportsOnPage.find(v => { try { return filter(v); } catch { return false; } }),
     findAll: (filter: (v: unknown) => boolean) => exportsOnPage.filter(v => { try { return filter(v); } catch { return false; } }),
+    // Bun keeps the first mock's export names for later mocks of @evi/api, and ui.test reads Components
+    Components: {},
 }));
 
-const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, PluginPermissionError, whenConnected } = await import("../src/discord");
+const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, parseMessageLink, PluginPermissionError, whenConnected } = await import("../src/discord");
 const { isDiscordClient } = await import("../src/discord/rest");
 const { createMist } = await import("../src/index");
 
@@ -163,22 +165,116 @@ test("whenConnected resolves at once when connected, on the next connection othe
     expect(subscribed()).toBe(0);
 });
 
-test("switchTo calls Discord's own switch with the id, and does nothing for the account already signed in", async () => {
+/** Discord's switch, answering `answer`, with the code Evi's filter matches */
+function discordSwitch(answer: () => unknown) {
     const calls: unknown[][] = [];
     function switchAccount(...args: unknown[]) {
         calls.push(args);
-        return Promise.resolve(true);
+        return answer();
     }
-    // The code Evi's filter matches, as in Discord's function
     switchAccount.toString = () => "function(e){log(`Switching account to ${e}`);dispatch({type:\"MULTI_ACCOUNT_SWITCH_START\"})}";
+    return { switchAccount, calls };
+}
+
+test("switchTo calls Discord's own switch with the id, and does nothing for the account already signed in", async () => {
+    const { switchAccount, calls } = discordSwitch(() => Promise.resolve(true));
     await expect(accounts.switchTo(ALT)).rejects.toThrow("isn't available");
 
     exportsOnPage = [switchAccount];
     found.set("UserStore", userStore(ME));
-    await accounts.switchTo(ALT);
-    await accounts.switchTo(ME);
-    expect(calls).toEqual([[ALT]]);
+    expect(await accounts.switchTo(ALT)).toBe("switched");
+    expect(await accounts.switchTo(ME)).toBe("already");
+    expect(await accounts.switchTo(ALT, { synchronously: false })).toBe("switched");
+    expect(calls).toEqual([[ALT], [ALT, false]]);
     await expect(accounts.switchTo("not an id")).rejects.toThrow(TypeError);
+});
+
+test("switchTo reports what Discord's switch answered: no saved login, a refusal, or a throw", async () => {
+    found.set("UserStore", userStore(ME));
+    for (const [answer, result] of [
+        [() => Promise.resolve(undefined), "needsLogin"],
+        [() => Promise.resolve(false), "failed"],
+        [() => Promise.reject(new Error("network")), "failed"],
+        [() => { throw new Error("sync"); }, "failed"],
+        [() => true, "switched"],
+    ] as const) {
+        exportsOnPage = [discordSwitch(answer).switchAccount];
+        expect(await accounts.switchTo(ALT)).toBe(result);
+    }
+});
+
+test("openLogin calls Discord's add-account login, and answers false without it", () => {
+    expect(accounts.openLogin()).toBe(false);
+    let opened = 0;
+    const login = () => void opened++;
+    login.toString = () => "function(){return open({onBackPressed:()=>{},onClose(){dispatch({type:\"LOGIN_RESET\"})}})}";
+    exportsOnPage = [login];
+    expect(accounts.openLogin()).toBe(true);
+    expect(opened).toBe(1);
+});
+
+test("accounts.scope runs at once for the signed-in account, and again for the next after a switch, aborting and cleaning up the last", async () => {
+    found.set("UserStore", userStore(ME));
+    const log: string[] = [];
+    const signals: AbortSignal[] = [];
+    const stop = accounts.scope((id, signal) => {
+        log.push(`run ${id}`);
+        signals.push(signal);
+        return () => log.push(`cleanup ${id}`);
+    });
+    expect(log).toEqual([`run ${ME}`]);
+    dispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ME } });
+    expect(log).toEqual([`run ${ME}`]);
+
+    dispatcher.dispatch({ type: "MULTI_ACCOUNT_SWITCH_START", targetUserId: ALT });
+    expect(signals[0].aborted).toBe(true);
+    expect(log).toEqual([`run ${ME}`, `cleanup ${ME}`]);
+    dispatcher.dispatch({ type: "LOGOUT", isSwitchingAccount: true });
+    dispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ALT } });
+    expect(log).toEqual([`run ${ME}`, `cleanup ${ME}`, `run ${ALT}`]);
+
+    dispatcher.dispatch({ type: "LOGOUT" });
+    expect(log.at(-1)).toBe(`cleanup ${ALT}`);
+    dispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ME } });
+    stop();
+    expect(log.slice(-2)).toEqual([`run ${ME}`, `cleanup ${ME}`]);
+    expect(subscribed()).toBe(0);
+});
+
+test("accounts.scope waits settleMs after a connection, and a switch during the wait runs nothing", async () => {
+    found.set("UserStore", userStore(undefined));
+    const runs: string[] = [];
+    const stop = accounts.scope(id => void runs.push(id), { settleMs: 20 });
+    expect(runs).toEqual([]);
+    dispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ME } });
+    dispatcher.dispatch({ type: "LOGOUT" });
+    dispatcher.dispatch({ type: "CONNECTION_OPEN", user: { id: ALT } });
+    expect(runs).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(runs).toEqual([ALT]);
+    stop();
+});
+
+test("accounts.scope reports an error from run or its cleanup instead of throwing into Discord's dispatch, and takes an async cleanup", async () => {
+    found.set("UserStore", userStore(ME));
+    const thrown: unknown[] = [];
+    const realReport = globalThis.reportError;
+    globalThis.reportError = err => void thrown.push(err);
+    let cleaned = 0;
+    try {
+        const stopBroken = accounts.scope(() => { throw new Error("run broke"); });
+        const stopCleanup = accounts.scope(() => () => { throw new Error("cleanup broke"); });
+        const stopAsync = accounts.scope(async () => () => void cleaned++);
+        await Promise.resolve();
+        expect(() => dispatcher.dispatch({ type: "LOGOUT" })).not.toThrow();
+        stopBroken();
+        stopCleanup();
+        stopAsync();
+    } finally {
+        globalThis.reportError = realReport;
+    }
+    expect(thrown.map(e => (e as Error).message)).toEqual(["run broke", "cleanup broke"]);
+    expect(cleaned).toBe(1);
 });
 
 /** Discord's API client. mist-api keeps the one it finds, so every test answers through this one. */
@@ -533,4 +629,112 @@ test("chat.localMessage shows Discord's own local message in the open channel, o
     chat.localMessage("hi");
     chat.localMessage("there", "9");
     expect(shown).toEqual([["7", "hi"], ["9", "there"]]);
+});
+
+/**
+ * Discord's settings updater for the preloaded proto (type 1), saving to `groups`. `save` says what
+ * Discord does after a change: confirm it, report an error, or say nothing.
+ */
+function settingsUpdater(save: "confirm" | "error" | "silent" = "confirm") {
+    const groups: Record<string, any> = {};
+    const reloads: boolean[] = [];
+    const customStatusType = { create: (value: object) => ({ ...value, $typeName: "discord_protos.discord_users.v1.CustomStatus" }) };
+    const updater = {
+        ProtoClass: {
+            typeName: "discord_protos.discord_users.v1.PreloadedUserSettings",
+            fields: [{ name: "status", localName: "status", T: () => ({ fields: [{ name: "custom_status", localName: "customStatus", T: () => customStatusType }] }) }],
+        },
+        type: 1,
+        async updateAsync(group: string, change: (value: any) => unknown, delay: number, onError: (err: unknown) => void) {
+            expect(delay).toBe(0);
+            const value = structuredClone(groups[group] ?? {});
+            if (change(value) === false) return;
+            groups[group] = value;
+            if (save === "confirm") setTimeout(() => dispatcher.dispatch({ type: "USER_SETTINGS_PROTO_UPDATE", settings: { type: 1, proto: {} }, wasSaved: true }), 1);
+            if (save === "error") setTimeout(() => onError(new Error("HTTP 400")), 1);
+        },
+        async loadIfNecessary(force: boolean) {
+            reloads.push(force);
+        },
+    };
+    exportsOnPage = [updater];
+    found.set("UserSettingsProtoStore", { get settings() { return groups; } });
+    return { groups, reloads };
+}
+
+test("settings.update changes a group with Discord's updater and resolves once Discord confirms the save", async () => {
+    const { groups } = settingsUpdater();
+    expect(await api.settings.update("preloaded", "status", value => { value.status = { value: "dnd" }; })).toBe("saved");
+    expect(groups.status.status).toEqual({ value: "dnd" });
+    expect(await api.settings.update("preloaded", "status", () => false)).toBe("unchanged");
+    expect(subscribed()).toBe(0);
+});
+
+test("settings.update answers failed when Discord reports an error, doesn't confirm in time, or has no updater, and reloads after a failure", async () => {
+    expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
+    const { reloads } = settingsUpdater("error");
+    expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
+    expect(reloads).toEqual([true]);
+    settingsUpdater("silent");
+    expect(await api.settings.update("preloaded", "status", () => { }, { timeoutMs: 10 })).toBe("failed");
+    expect(subscribed()).toBe(0);
+    await expect(api.settings.update("other" as never, "status", () => { })).rejects.toThrow(TypeError);
+});
+
+test("settings.update and status.set are held to changeSettings, before Discord's updater is called", async () => {
+    // declared() puts Discord's API client on the page, so the updater goes on after it
+    const { settings, status } = declared({ network: ["discord.com"] });
+    const { groups } = settingsUpdater();
+    expect(await refusal(settings.update("preloaded", "status", () => { }))).toMatchObject({ name: "PluginPermissionError", permission: "changeSettings" });
+    expect(await refusal(status.set({ text: "hi" }))).toMatchObject({ permission: "changeSettings" });
+    const noNetwork = declared({ changeSettings: true });
+    settingsUpdater();
+    expect(await refusal(noNetwork.status.set(null))).toMatchObject({ permission: "network" });
+    expect(groups).toEqual({});
+    const allowed = declared({ network: ["discord.com"], changeSettings: true });
+    settingsUpdater();
+    expect(await allowed.status.set({ text: "hi" })).toBe("saved");
+});
+
+test("status.set writes the custom status as Discord's proto type, and reads back through status.get", async () => {
+    const { groups } = settingsUpdater();
+    expect(api.status.get()).toBeNull();
+    const before = Date.now();
+    expect(await api.status.set({ text: "Listening", emojiName: "🎵", expiresAt: 1_900_000_000_000 })).toBe("saved");
+    expect(groups.status.customStatus).toMatchObject({
+        $typeName: "discord_protos.discord_users.v1.CustomStatus", text: "Listening", emojiName: "🎵", emojiId: "0", expiresAtMs: "1900000000000",
+    });
+    expect(Number(groups.status.customStatus.createdAtMs)).toBeGreaterThanOrEqual(before);
+    expect(api.status.get()).toEqual({ text: "Listening", emojiName: "🎵", expiresAt: 1_900_000_000_000 });
+
+    expect(await api.status.set({ text: "Listening", emojiName: "🎵", expiresAt: 1_900_000_000_000 })).toBe("unchanged");
+    expect(await api.status.set({ text: "", emojiName: "party", emojiId: "123456789012345678" })).toBe("saved");
+    expect(api.status.get()).toEqual({ text: "", emojiName: "party", emojiId: "123456789012345678" });
+    expect(await api.status.set(null)).toBe("saved");
+    expect(api.status.get()).toBeNull();
+    expect(await api.status.set(null)).toBe("unchanged");
+});
+
+test("status.set refuses a status Discord wouldn't take", async () => {
+    settingsUpdater();
+    for (const bad of [{ text: "x".repeat(129) }, { text: "" }, { text: "a", emojiId: "x" }, { text: "a", expiresAt: -1 }, "hi"]) {
+        await expect(api.status.set(bad as never)).rejects.toThrow(TypeError);
+    }
+});
+
+test("format.messageLink and parseMessageLink write and read Discord's message links", () => {
+    expect(format.messageLink("111", "222", "333")).toBe("https://discord.com/channels/111/222/333");
+    expect(format.messageLink(null, "222")).toBe("https://discord.com/channels/@me/222");
+    expect(() => format.messageLink("x", "222")).toThrow(TypeError);
+    expect(() => format.messageLink(null, "222", "")).toThrow(TypeError);
+
+    expect(parseMessageLink("https://discord.com/channels/111/222/333")).toEqual({ guildId: "111", channelId: "222", messageId: "333" });
+    expect(parseMessageLink(" <https://ptb.discord.com/channels/@me/222/> ")).toEqual({ guildId: null, channelId: "222" });
+    expect(parseMessageLink("canary.discordapp.com/channels/1/2/3?x=1")).toEqual({ guildId: "1", channelId: "2", messageId: "3" });
+    expect(parseMessageLink("https://discordapp.com/channels/1/2")).toEqual({ guildId: "1", channelId: "2" });
+    for (const bad of ["https://example.com/channels/1/2/3", "https://discord.com/channels/1", "https://discord.com.evil.com/channels/1/2", "discord.com/channels/a/2", "see https://discord.com/channels/1/2/3", 5]) {
+        expect(parseMessageLink(bad as string)).toBeNull();
+    }
+    const link = format.messageLink("9", "8", "7");
+    expect(parseMessageLink(link)).toEqual({ guildId: "9", channelId: "8", messageId: "7" });
 });

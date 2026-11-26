@@ -63,6 +63,10 @@ test("mist errors maps a frame through the build it ran in, and leaves a stack t
     expect(records[1].original).toBeNull();
 }, 30_000);
 
+test("mist errors reads which plugins patch a module again once Evi compiles a module anew", () => {
+    expect(scenario("errorsRepatched")).toEqual([[["before"], "patched module"], [["after"], "patched module"]]);
+}, 30_000);
+
 test("mist errors and mist module never let Discord's page pause: pauses are skipped before the debugger is on, a pause that comes anyway is resumed, and a failed skip turns nothing on", () => {
     const r = scenario("pauses");
     for (const name of ["errors", "module"]) {
@@ -87,7 +91,11 @@ test("mist errors lines a plugin's map up with the code inside Evi's wrapper, wh
 
 test("mist perf lists each plugin's sites, and the applied patches none of whose $self functions ran", () => {
     const report = scenario("perf");
-    expect(report.unrun).toEqual([{ plugin: "alpha", index: 1, find: "b", names: ["unused", "alsoUnused"], modules: ["2"] }]);
+    // An ambiguous patch counts when Evi applied it, by its state; its health doesn't say
+    expect(report.unrun).toEqual([
+        { plugin: "alpha", index: 1, find: "b", names: ["unused", "alsoUnused"], modules: ["2"] },
+        { plugin: "gamma", index: 0, find: "g", names: ["appliedOnce"], modules: ["6"] },
+    ]);
     expect(report.unreadable).toBe(1);
     const lines = perfLines(report, 5);
     expect(lines[0]).toBe("Evi on module loading: 10 modules, 2 patched, patching 1.5 ms, listeners 0.5 ms");
@@ -104,6 +112,10 @@ test("mist dev prints each hot reload once it settles, a reload that failed, ign
     ]);
     expect(listeners).toBe(0);
     expect(missing).toStartWith("nope isn't installed");
+}, 30_000);
+
+test("mist dev says a removed plugin was removed once, however often other changes notify after", () => {
+    expect(scenario("devRemoved")).toEqual([{ removed: true, version: "1.0.0" }]);
 }, 30_000);
 
 test("mist module reads the patched copy Evi compiled, diffs it, and says which patch each change is likely from", () => {
@@ -154,10 +166,10 @@ test("mist leaks finds what grows with every cycle, leaves the plugin on, and re
     expect(r.leaky).toEqual({ styles: 1, subscribers: 1 });
     expect([r.leakySwitches, r.leakyRunning]).toEqual([6, true]);
     expect([r.clean, r.cleanRunning]).toEqual([{}, true]);
-    expect(r.installed).toBe("mist leaks turns plugins off and on, so it runs only on dev builds, and installed is a store install");
-    expect(r.off).toBe("off isn't running: turn it on first, so mist leaks can leave it as it was");
-    expect(r.native).toBe("native has a native side, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself");
-    expect(r.chromiumSwitches).toBe("switches has Chromium switches, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself");
+    expect(r.installed).toBe("mist leaks runs only on dev builds: installed is a store install");
+    expect(r.off).toBe("off isn't running: turn it on first, and mist leaks leaves it on");
+    expect(r.native).toBe("mist leaks can't turn native on again by itself: it has a native side, and Evi asks yes or no each time it is turned on");
+    expect(r.chromiumSwitches).toBe("mist leaks can't turn switches on again by itself: it has Chromium switches, and Evi asks yes or no each time it is turned on");
     expect(r.refusedSwitches).toBe(0);
 }, 30_000);
 
@@ -258,7 +270,7 @@ test("mist manifest fix drops and writes nothing when even dropping every old tr
     for (const locale of Object.values(allOldDropped.locales!)) delete locale.changelog!["1.1.0"];
     expect(r.over).toBe(builtBytes(allOldDropped, basename(dir), false) - MAX_BYTES);
     expect([r.written, readFileSync(path, "utf8")]).toEqual([false, original]);
-    expect(fixLines(r)).toContain(`${r.over} bytes over even with every old translated note gone, so nothing is dropped and nothing written: shorten the English changelog or this version's translations.`);
+    expect(fixLines(r)).toContain(`${r.over} bytes over even with every old translated note gone. Nothing dropped or written: shorten the English changelog or this version's translations.`);
 });
 
 test("mist manifest bump counts patch, minor and major up, and takes only a higher version", () => {
@@ -285,6 +297,32 @@ test("mist manifest bump adds the version's notes first, in English and each lan
     expect(bump.missing).not.toContain("fr 1.3.0 notes");
     expect(bump.missing).toContain("fr name");
     expect(input.version).toBe("1.2.0");
+});
+
+test("mist manifest bump replaces a locale's stale notes for the new version, and still lists it first", () => {
+    const input = manifest({ locales: { fr: { name: "Démo", description: "Fait une chose.", changelog: { "1.2.0": ["Nouveau."], "1.3.0": ["Périmé."] } } } });
+    const bump = bumpManifest(input, "minor", { en: ["Faster."] }, "demo", false);
+    expect(bump.manifest.locales!.fr.changelog).toEqual({ "1.3.0": ["Faster."], "1.2.0": ["Nouveau."] });
+    expect(Object.keys(bump.manifest.locales!.fr.changelog!)).toEqual(["1.3.0", "1.2.0"]);
+    expect(bump.copied).toContain("fr");
+});
+
+test("mist manifest fix --write on a manifest without a name says so, and writes once rather than at every run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    const path = join(dir, "manifest.json");
+    writeFileSync(path, JSON.stringify({ id: "demo", description: "Does a thing.", version: "1.0.0" }, null, 4));
+    const first = fixManifestDir(dir, true);
+    expect([first.written, first.nameless]).toEqual([true, true]);
+    expect(JSON.parse(readFileSync(path, "utf8")).locales.de).toEqual({ description: "Does a thing." });
+    const again = fixManifestDir(dir, true);
+    expect([again.written, again.changed, again.missing]).toEqual([false, false, LANGUAGES.map(lang => `${lang} name`)]);
+    expect(fixLines(again)).toContain("manifest.json has no name to copy into the translations: add one.");
+    expect(fixLines(again)).not.toContain("Nothing written: run with --write to change manifest.json.");
+
+    const empty = mkdtempSync(join(tmpdir(), "mist-manifest-"));
+    writeFileSync(join(empty, "manifest.json"), JSON.stringify({ id: "demo", version: "1.0.0" }));
+    expect(fixManifestDir(empty, true).written).toBe(false);
+    expect(readFileSync(join(empty, "manifest.json"), "utf8")).toBe(JSON.stringify({ id: "demo", version: "1.0.0" }));
 });
 
 test("mist manifest bump refuses no English note, an unknown language and a version the changelog already has", () => {
@@ -338,7 +376,7 @@ test("mist manifest bump writes nothing when the new notes leave the manifest ov
     const r = bumpManifestDir(dir, "patch", { en: Array.from({ length: 6 }, () => "y".repeat(400)) }, true);
     expect(r.over).toBeGreaterThan(0);
     expect([r.written, readFileSync(path, "utf8")]).toEqual([false, original]);
-    expect(bumpLines(r)).toContain(`${r.over} bytes over Evi's 16.0 KB even with every old translated note gone, so nothing is written: shorten the notes.`);
+    expect(bumpLines(r)).toContain(`${r.over} bytes over Evi's 16.0 KB even with every old translated note gone. Nothing written: shorten the notes.`);
 });
 
 /** A fake debugging port: each connect reads the next of `answers`, a status list, null, or an error */

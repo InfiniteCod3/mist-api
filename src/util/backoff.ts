@@ -1,3 +1,5 @@
+import { checkDelay, checkNumber, MAX_TIMEOUT_MS } from "../internal.ts";
+
 export interface BackoffOptions {
     /** The first delay. Default 1000 */
     baseMs?: number;
@@ -20,21 +22,15 @@ export interface Backoff {
     readonly attempts: number;
 }
 
-function checkNumber(name: string, value: number, min: number, max = Infinity) {
-    if (typeof value !== "number" || !(value >= min && value <= max) || value === Infinity) {
-        throw new TypeError(`backoff's ${name} must be a finite number from ${min}${max < Infinity ? ` to ${max}` : ""}, got ${value}`);
-    }
-}
-
 /**
  * Delays between retries: baseMs, then factor times longer each attempt, never over maxMs. The last
- * `jitter` share of each delay is random, so clients that failed together don't retry together.
+ * `jitter` share of each delay is random: clients that failed together don't retry together.
  */
 export function backoff({ baseMs = 1000, maxMs = Math.max(30_000, baseMs), factor = 2, jitter = 0.2, random = Math.random }: BackoffOptions = {}): Backoff {
-    checkNumber("baseMs", baseMs, 0);
-    checkNumber("maxMs", maxMs, baseMs);
-    checkNumber("factor", factor, 1);
-    checkNumber("jitter", jitter, 0, 1);
+    checkDelay("backoff", "baseMs", baseMs);
+    checkNumber("backoff", "maxMs", maxMs, { min: baseMs, max: MAX_TIMEOUT_MS });
+    checkNumber("backoff", "factor", factor, { min: 1 });
+    checkNumber("backoff", "jitter", jitter, { min: 0, max: 1 });
     let attempts = 0;
     return {
         next() {

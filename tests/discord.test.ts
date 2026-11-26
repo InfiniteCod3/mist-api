@@ -36,8 +36,9 @@ mock.module("@evi/api", () => ({
     Components: {},
 }));
 
-const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, format, navigate, parseMessageLink, PluginPermissionError, whenConnected } = await import("../src/discord");
+const { accounts, avatarUrl, chat, copy, discord, DiscordApiError, displayName, format, navigate, parseMessageLink, PluginPermissionError, snowflake, whenConnected } = await import("../src/discord");
 const { isDiscordClient } = await import("../src/discord/rest");
+const { durationParts } = await import("../src/discord/format");
 const { createMist } = await import("../src/index");
 
 /** Evi's plugins, by id: each one's manifest permissions, undefined for one that declares none. An id not listed isn't loaded. */
@@ -52,7 +53,7 @@ afterAll(() => {
     pageGlobals.Evi = eviBefore;
 });
 
-/** A plugin's mist object, defined, so mist's page registry holds its handle */
+/** A plugin's mist object, defined: mist's page registry then holds its handle */
 function mistOf(id: string) {
     const mist = createMist(id);
     mist.define({});
@@ -64,6 +65,32 @@ const api = discord(mistOf("t-discord"));
 
 const ME = "100000000000000001", ALT = "100000000000000002";
 const userStore = (id: string | undefined) => ({ getCurrentUser: () => id ? { id, username: "me" } : undefined });
+
+/**
+ * Runs `body` with console.error collecting what it logs, and reportError counting its calls:
+ * mist-api logs these errors, as Discord and Evi read a reported one as a crash.
+ */
+async function logging(body: () => unknown): Promise<{ lines: string[]; errors: unknown[]; reported: number; }> {
+    const lines: string[] = [];
+    const errors: unknown[] = [];
+    let reported = 0;
+    const realError = console.error;
+    const realReport = globalThis.reportError;
+    console.error = (line: unknown, ...rest: unknown[]) => {
+        lines.push(String(line));
+        errors.push(...rest);
+    };
+    globalThis.reportError = () => void reported++;
+    try {
+        await body();
+    } finally {
+        console.error = realError;
+        globalThis.reportError = realReport;
+    }
+    return { lines, errors, reported };
+}
+
+const messagesOf = (errors: unknown[]) => errors.map(e => (e as Error).message);
 
 afterEach(() => {
     found.clear();
@@ -128,24 +155,24 @@ test("accounts.on reports a switch, the connection that ends it, and a logout, a
     expect(subscribed()).toBe(0);
 });
 
-test("a switch Discord starts without a switch action is still reported, and a throwing listener doesn't stop the next", () => {
+test("a switch Discord starts without a switch action is still reported, and a throwing listener is logged and doesn't stop the next", async () => {
     found.set("UserStore", userStore(ME));
     const seen: unknown[] = [];
-    const thrown: unknown[] = [];
-    const realReport = globalThis.reportError;
-    globalThis.reportError = err => void thrown.push(err);
     const offs = [
         accounts.on("switching", () => { throw new Error("listener broke"); }),
         accounts.on("switching", e => seen.push(e)),
     ];
-    try {
-        dispatcher.dispatch({ type: "LOGOUT", isSwitchingAccount: true });
-    } finally {
-        globalThis.reportError = realReport;
-        for (const off of offs) off();
-    }
+    const logged = await logging(() => {
+        try {
+            dispatcher.dispatch({ type: "LOGOUT", isSwitchingAccount: true });
+        } finally {
+            for (const off of offs) off();
+        }
+    });
     expect(seen).toEqual([{ type: "switching", from: ME, to: undefined }]);
-    expect(thrown).toHaveLength(1);
+    expect(messagesOf(logged.errors)).toEqual(["listener broke"]);
+    expect(logged.lines).toEqual(['accounts.on: a "switching" listener threw:']);
+    expect(logged.reported).toBe(0);
 });
 
 test("whenConnected resolves at once when connected, on the next connection otherwise, and rejects on abort", async () => {
@@ -176,7 +203,7 @@ function discordSwitch(answer: () => unknown) {
     return { switchAccount, calls };
 }
 
-test("switchTo calls Discord's own switch with the id, and does nothing for the account already signed in", async () => {
+test("switchTo calls Discord's switch with the id, and does nothing for the account already signed in", async () => {
     const { switchAccount, calls } = discordSwitch(() => Promise.resolve(true));
     await expect(accounts.switchTo(ALT)).rejects.toThrow("isn't available");
 
@@ -189,18 +216,22 @@ test("switchTo calls Discord's own switch with the id, and does nothing for the 
     await expect(accounts.switchTo("not an id")).rejects.toThrow(TypeError);
 });
 
-test("switchTo reports what Discord's switch answered: no saved login, a refusal, or a throw", async () => {
+test("switchTo reports what Discord's switch answered: no saved login, a refusal, or a throw, which is logged", async () => {
     found.set("UserStore", userStore(ME));
-    for (const [answer, result] of [
-        [() => Promise.resolve(undefined), "needsLogin"],
-        [() => Promise.resolve(false), "failed"],
-        [() => Promise.reject(new Error("network")), "failed"],
-        [() => { throw new Error("sync"); }, "failed"],
-        [() => true, "switched"],
-    ] as const) {
-        exportsOnPage = [discordSwitch(answer).switchAccount];
-        expect(await accounts.switchTo(ALT)).toBe(result);
-    }
+    const { errors, reported } = await logging(async () => {
+        for (const [answer, result] of [
+            [() => Promise.resolve(undefined), "needsLogin"],
+            [() => Promise.resolve(false), "failed"],
+            [() => Promise.reject(new Error("network")), "failed"],
+            [() => { throw new Error("sync"); }, "failed"],
+            [() => true, "switched"],
+        ] as const) {
+            exportsOnPage = [discordSwitch(answer).switchAccount];
+            expect(await accounts.switchTo(ALT)).toBe(result);
+        }
+    });
+    expect(messagesOf(errors)).toEqual(["network", "sync"]);
+    expect(reported).toBe(0);
 });
 
 test("openLogin calls Discord's add-account login, and answers false without it", () => {
@@ -255,13 +286,10 @@ test("accounts.scope waits settleMs after a connection, and a switch during the 
     stop();
 });
 
-test("accounts.scope reports an error from run or its cleanup instead of throwing into Discord's dispatch, and takes an async cleanup", async () => {
+test("accounts.scope logs an error from run or its cleanup instead of throwing into Discord's dispatch, and takes an async cleanup", async () => {
     found.set("UserStore", userStore(ME));
-    const thrown: unknown[] = [];
-    const realReport = globalThis.reportError;
-    globalThis.reportError = err => void thrown.push(err);
     let cleaned = 0;
-    try {
+    const { lines, errors, reported } = await logging(async () => {
         const stopBroken = accounts.scope(() => { throw new Error("run broke"); });
         const stopCleanup = accounts.scope(() => () => { throw new Error("cleanup broke"); });
         const stopAsync = accounts.scope(async () => () => void cleaned++);
@@ -270,14 +298,64 @@ test("accounts.scope reports an error from run or its cleanup instead of throwin
         stopBroken();
         stopCleanup();
         stopAsync();
-    } finally {
-        globalThis.reportError = realReport;
-    }
-    expect(thrown.map(e => (e as Error).message)).toEqual(["run broke", "cleanup broke"]);
+    });
+    expect(messagesOf(errors)).toEqual(["run broke", "cleanup broke"]);
+    expect(lines).toEqual(["accounts.scope: run threw:", "accounts.scope: cleanup threw:"]);
+    expect(reported).toBe(0);
     expect(cleaned).toBe(1);
 });
 
-/** Discord's API client. mist-api keeps the one it finds, so every test answers through this one. */
+test("accounts.scope takes a cleanup from any thenable, as a promise from another realm is, not only this realm's Promise", async () => {
+    found.set("UserStore", userStore(ME));
+    let cleaned = 0;
+    // A thenable that isn't instanceof Promise, as one made in an iframe or another bundle's realm
+    const foreign = { then: (resolve: (cleanup: () => void) => void) => resolve(() => void cleaned++) };
+    const stop = accounts.scope(() => foreign as never);
+    await Promise.resolve();
+    stop();
+    expect(cleaned).toBe(1);
+});
+
+test("accounts.scope aborts a run's signal with an AbortError when its account leaves, and refuses a settleMs setTimeout can't hold", () => {
+    found.set("UserStore", userStore(ME));
+    let signal: AbortSignal | undefined;
+    const stop = accounts.scope((_, s) => void (signal = s));
+    dispatcher.dispatch({ type: "LOGOUT" });
+    expect(signal?.reason).toBeInstanceOf(DOMException);
+    expect(signal?.reason).toMatchObject({ name: "AbortError", message: "Account changed" });
+    stop();
+    expect(() => accounts.scope(() => { }, { settleMs: 3e9 })).toThrow(RangeError);
+    expect(() => accounts.scope(() => { }, { settleMs: -1 })).toThrow("accounts.scope: settleMs");
+    expect(subscribed()).toBe(0);
+});
+
+test("accounts.scope cleans up at once after an async run that finishes once its account has left, and keeps scopes apart", async () => {
+    found.set("UserStore", userStore(ME));
+    const log: string[] = [];
+    let finish!: () => void;
+    const stopSlow = accounts.scope(async id => {
+        await new Promise<void>(resolve => { finish = resolve; });
+        return () => log.push(`slow cleanup ${id}`);
+    });
+    const stopQuick = accounts.scope(id => () => log.push(`quick cleanup ${id}`));
+    dispatcher.dispatch({ type: "LOGOUT" });
+    expect(log).toEqual([`quick cleanup ${ME}`]);
+    finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(log).toEqual([`quick cleanup ${ME}`, `slow cleanup ${ME}`]);
+    stopSlow();
+    stopQuick();
+    stopQuick();
+    expect(subscribed()).toBe(0);
+});
+
+test("accounts.scope refuses what isn't a function", () => {
+    expect(() => accounts.scope("run" as never)).toThrow(TypeError);
+    expect(subscribed()).toBe(0);
+});
+
+/** Discord's API client. mist-api keeps the one it finds: every test answers through this one. */
 let answer: (method: string, request: any) => unknown = () => ({});
 const requests: { method: string; request: any; }[] = [];
 const method = (name: string) => async (request: any) => {
@@ -371,6 +449,17 @@ test("messages waits out a 429 and asks for the same page again", async () => {
     expect(requests.map(r => r.request.query.before)).toEqual([undefined, "51", "51", "51"]);
 });
 
+test("messages waits out a retry_after longer than setTimeout holds as long as it can, rather than throwing or asking at once", async () => {
+    serve(() => { throw { ok: false, status: 429, body: { retry_after: 3e9 }, retryAfter: 3e9 }; });
+    const abort = new AbortController();
+    const pending = collect(api.messages("9", { signal: abort.signal }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(1);
+    abort.abort(new Error("gave up"));
+    await expect(pending).rejects.toThrow("gave up");
+    expect(requests).toHaveLength(1);
+});
+
 test("messages skips entries that aren't messages and refuses both before and after", async () => {
     serve(() => ({ ok: true, status: 200, body: [{ id: "2", channel_id: "9", content: "ok", timestamp: "t", author: { id: "5", username: "a" } }, { id: "1" }, null] }));
     expect(await collect(api.messages("9"))).toEqual([2]);
@@ -402,11 +491,92 @@ test("a declared site covers its subdomains and reads in any case, as in Evi", a
     expect(requests).toHaveLength(1);
 });
 
-test("GET needs only network, even on a write endpoint", async () => {
+test("GET needs only network, even on a write endpoint, unless it reads messages", async () => {
     const { rest } = declared({ network: ["discord.com"] });
-    await rest.get("/channels/1/messages");
+    await rest.get("/channels/1/threads");
     await rest.get("/users/@me/settings-proto/1");
-    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/messages", "/users/@me/settings-proto/1"]);
+    await rest.get("/channels/1");
+    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/threads", "/users/@me/settings-proto/1", "/channels/1"]);
+});
+
+test("a GET that reads messages is held to readMessages, as messages() is, however the path is written", async () => {
+    const { rest } = declared({ network: ["discord.com"] });
+    const reads = [
+        "/channels/1/messages", "/channels/1/messages/2", "/channels/1/messages/search?content=x", "/channels/1/pins", "/guilds/1/messages/search",
+        "/channels//1/messages", "/channels/1/messages/", "/CHANNELS/1/MESSAGES", "/channels/1/%6Dessages", "/channels/1/%E0%A4%A",
+        // Your mentions and a thread search answer with messages too
+        "/users/@me/mentions", "/users/@me/mentions?limit=25", "/channels/1/threads/search", "/channels/1/threads/search?archived=true",
+        // A character no route has could reach any of them
+        "/channels/1/messages;x", "/channels/1/messages%00", "/channels/1/messages%3Bx", "/channels/1%0A/messages", "/users/@me%7F",
+    ];
+    for (const path of reads) {
+        expect({ path, refused: await refusal(rest.get(path)) }).toMatchObject({ path, refused: { name: "PluginPermissionError", permission: "readMessages", target: path } });
+    }
+    // A backslash after the first "/" could make a host of it: refused as no path at all
+    expect(await refusal(rest.get("/\\channels/1/messages"))).toMatchObject({ name: "TypeError", message: 'rest.get: API path must start with a single "/", got "/\\\\channels/1/messages"' });
+    expect(requests).toHaveLength(0);
+    // A name that only starts like one isn't a message read
+    await rest.get("/users/@me/mentionsx");
+    await rest.get("/channels/1/messages-count");
+    await rest.get("/channels/1/threads/searchable");
+    expect(requests.map(r => r.request.url)).toEqual(["/users/@me/mentionsx", "/channels/1/messages-count", "/channels/1/threads/searchable"]);
+    requests.length = 0;
+
+    const reader = declared({ network: ["discord.com"], readMessages: true });
+    await reader.rest.get("/channels/1/messages");
+    expect(requests).toHaveLength(1);
+    // network is checked first, as for messages()
+    expect(await refusal(declared({ readMessages: true }).rest.get("/channels/1/messages"))).toMatchObject({ permission: "network" });
+});
+
+test("a \".\" or \"..\" segment, plain or escaped, is refused before any permission is checked, so it can't climb to another route", async () => {
+    const { rest } = declared({ network: ["discord.com"] });
+    // Under Discord's /api/v9 base, each of these would reach a message read, a send or a settings change
+    const climbs = ["/../v9/channels/1/messages", "/%2e%2e/v9/channels/1/messages", "/%2E%2E/v9/channels/1/messages", "/x/../../v9/users/@me/mentions", "/channels/1/x/../messages", "/channels/1/./messages", "/channels/1/%2e%2e/messages", "/channels/1/%2e/messages"];
+    for (const path of climbs) {
+        for (const method of ["get", "post", "patch"] as const) {
+            expect({ path, method, refused: await refusal(rest[method](path)) }).toMatchObject({ path, method, refused: { name: "TypeError", message: `rest.${method}: API path can't have a "." or ".." segment, got ${JSON.stringify(path)}` } });
+        }
+    }
+    expect(await refusal(rest.patch("/../v9/users/@me/settings-proto/1", { body: {} }))).toMatchObject({ name: "TypeError" });
+    // Even a plugin that declares every permission can't send one
+    const all = declared({ network: ["discord.com"], readMessages: true, sendMessages: true, changeSettings: true });
+    expect(await refusal(all.rest.get("/../v9/channels/1/messages"))).toMatchObject({ name: "TypeError" });
+    // Raw control characters are refused before the URL parser could strip them
+    for (const bad of ["/\t/evil.com", "/x/.\t./users/@me/settings", "/channels/1\n/messages", "/channels/1\r/messages"]) {
+        expect(await refusal(rest.get(bad))).toMatchObject({ name: "TypeError", message: expect.stringContaining("can't contain control characters") });
+    }
+    expect(requests).toHaveLength(0);
+    // A dot inside a name or inside a query string isn't a path segment
+    await rest.get("/channels/1/x.y");
+    await rest.get("/channels/1/..x");
+    await rest.get("/channels/1/x?next=/../y");
+    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/x.y", "/channels/1/..x", "/channels/1/x?next=/../y"]);
+});
+
+test("a path is read under Discord's /api/v9 base, and one that climbs out of /api can't be read", async () => {
+    const { readApiPath } = await import("../src/permissions");
+    expect(readApiPath("/../v9/channels/1/messages")).toBe("/channels/1/messages");
+    expect(readApiPath("/%2e%2e/v9/channels/1/messages")).toBe("/channels/1/messages");
+    expect(readApiPath("/x/../../v9/users/@me/mentions")).toBe("/users/@me/mentions");
+    expect(readApiPath("/../../../channels/1/messages")).toBeUndefined();
+    expect(readApiPath("/%2e%2e/%2e%2e/channels/1/messages")).toBeUndefined();
+    expect(readApiPath("/channels/1/messages")).toBe("/channels/1/messages");
+    // A path that names the version itself sits under the base's: Discord answers it with a 404
+    expect(readApiPath("/v9/channels/1/messages")).toBe("/v9/channels/1/messages");
+});
+
+test("POST to a forum channel's post-data, which answers with messages, is refused without readMessages", async () => {
+    const { rest } = declared({ network: ["discord.com"], sendMessages: true });
+    for (const path of ["/channels/1/post-data", "/channels/1/post-data?x=1", "/CHANNELS/1/POST-DATA", "/channels/1/post%2Ddata", "/channels/1/post-data/"]) {
+        expect({ path, refused: await refusal(rest.post(path, { body: { thread_ids: ["2"] } })) }).toMatchObject({ path, refused: { name: "PluginPermissionError", permission: "readMessages", target: path } });
+    }
+    expect(requests).toHaveLength(0);
+    // A name that only starts like it isn't
+    await rest.post("/channels/1/post-datas");
+    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/post-datas"]);
+    await declared({ network: ["discord.com"], readMessages: true }).rest.post("/channels/1/post-data", { body: { thread_ids: ["2"] } });
+    expect(requests.map(r => r.request.url)).toEqual(["/channels/1/post-data"]);
 });
 
 test("POST to a channel's messages is refused without sendMessages and sent with it", async () => {
@@ -465,7 +635,7 @@ test("a plugin that declares nothing is allowed everything, as Evi allows it", a
     expect(requests).toHaveLength(3);
 });
 
-test("an id Evi has no plugin by is refused, so a made-up id isn't a plugin that declares nothing", async () => {
+test("an id Evi has no plugin by is refused: a made-up id isn't a plugin that declares nothing", async () => {
     serve(ok);
     const madeUp = discord(mistOf("t-made-up"));
     const err = await refusal(madeUp.rest.get("/users/@me"));
@@ -474,26 +644,37 @@ test("an id Evi has no plugin by is refused, so a made-up id isn't a plugin that
     expect(requests).toHaveLength(0);
 });
 
-test("discord takes only the plugin's own mist object, so a plugin can't borrow another's permissions by naming its id", async () => {
+test("discord takes only the mist object createMist made for the plugin: naming another's id doesn't borrow its permissions", async () => {
     const mist = mistOf("t-declared");
     declarations = { "t-declared": { network: ["discord.com"] }, "t-borrower": { network: ["discord.com"] } };
     serve(ok);
     expect(await refusal(discord(mist).rest.post("/channels/1/messages"))).toMatchObject({ plugin: "t-declared", permission: "sendMessages" });
-    // t-discord declares nothing, so it may send: naming it must not lend that to another plugin
+    // t-discord declares nothing and may send: naming it must not lend that to another plugin
     for (const forged of ["t-discord", { id: "t-discord" }, { id: "t-discord", log: mist.log }, "", {}, null]) {
         expect(() => discord(forged as never)).toThrow(TypeError);
     }
-    expect(() => discord("t-discord" as never)).toThrow("discord() takes the plugin's own mist object, from createMist, after mist.define; got the string \"t-discord\"");
-    // Made but never defined: the registry holds no handle for it
-    expect(() => discord(createMist("t-borrower"))).toThrow(TypeError);
+    expect(() => discord("t-discord" as never)).toThrow('discord() takes the mist object from createMist; got "t-discord"');
+    expect(() => discord({ id: "t-discord" } as never)).toThrow('discord() takes the mist object from createMist; got an object with id "t-discord"');
     expect(requests).toHaveLength(0);
+});
+
+test("discord takes a mist object as soon as createMist makes it, before mist.define", async () => {
+    declarations = { "t-early": { network: ["discord.com"] } };
+    serve(ok);
+    const early = discord(createMist("t-early"));
+    expect(await refusal(early.rest.post("/channels/1/messages"))).toMatchObject({ plugin: "t-early", permission: "sendMessages" });
+    await early.rest.get("/users/@me");
+    expect(requests).toHaveLength(1);
 });
 
 test("messages checks its arguments and the permission when called, not at the first next()", () => {
     serve(ok);
-    for (const limit of [-1, Infinity, NaN, "5"]) expect(() => api.messages("9", { limit: limit as number })).toThrow(TypeError);
-    expect(() => api.messages("not an id")).toThrow(TypeError);
-    expect(() => api.messages("9", { before: "x" })).toThrow(TypeError);
+    for (const limit of [NaN, "5"]) expect(() => api.messages("9", { limit: limit as number })).toThrow(TypeError);
+    for (const limit of [-1, Infinity]) expect(() => api.messages("9", { limit })).toThrow(RangeError);
+    expect(() => api.messages("9", { limit: -1 })).toThrow("messages: limit must be a finite number from 0, got -1");
+    expect(() => api.messages("not an id")).toThrow('messages: channelId must be a Discord id (1 to 20 digits, at most 18446744073709551615), got "not an id"');
+    expect(() => api.messages("9", { before: "x" })).toThrow("messages: before must be a Discord id");
+    expect(() => api.messages("9", { after: "18446744073709551616" })).toThrow("messages: after must be a Discord id");
     expect(() => declared({ network: ["discord.com"] }).messages("9")).toThrow(PluginPermissionError);
     expect(requests).toHaveLength(0);
 });
@@ -509,7 +690,128 @@ test("navigate goes through Discord's router and refuses what isn't a path", () 
     expect(went).toEqual(["/channels/@me"]);
 });
 
-test("avatarUrl gives the user's own avatar at a CDN size, else Discord's default for them", () => {
+test("navigate.channel opens a channel in its server, a DM's under @me, and jumps to a message; it takes a parsed link", () => {
+    const went: string[] = [];
+    const transitionTo = (path: string) => void went.push(path);
+    transitionTo.toString = () => "function(e,t){log(`transitionTo - Transitioning to ${e}`)}";
+    exportsOnPage = [transitionTo];
+    found.set("ChannelStore", { getChannel: (id: string) => id === "22" ? { id, type: 0, guild_id: "11" } : id === "33" ? { id, type: 1, guild_id: null } : undefined });
+    navigate.channel("22");
+    navigate.channel("22", { messageId: "44" });
+    navigate.channel("33");
+    navigate.channel("55", { guildId: null });
+    navigate.channel("22", { guildId: null });
+    navigate.channel("66", { guildId: "77" });
+    navigate.channel("2", parseMessageLink("https://discord.com/channels/1/2/3")!);
+    expect(went).toEqual(["/channels/11/22", "/channels/11/22/44", "/channels/@me/33", "/channels/@me/55", "/channels/@me/22", "/channels/77/66", "/channels/1/2/3"]);
+    for (const [channelId, target] of [["x", {}], ["22", { messageId: "" }], ["22", { guildId: "@me" }], ["../x", {}]] as const) {
+        expect(() => navigate.channel(channelId, target)).toThrow(TypeError);
+    }
+    expect(went).toHaveLength(7);
+});
+
+test("navigate.channel without guildId throws for a channel ChannelStore doesn't hold, rather than guess its page", () => {
+    const went: string[] = [];
+    const transitionTo = (path: string) => void went.push(path);
+    transitionTo.toString = () => "function(e,t){log(`transitionTo - Transitioning to ${e}`)}";
+    exportsOnPage = [transitionTo];
+    found.set("ChannelStore", { getChannel: () => undefined });
+    expect(() => navigate.channel("55")).toThrow("navigate.channel: channel 55 isn't in ChannelStore; pass guildId (or null for a DM)");
+    expect(() => navigate.channel("55", { messageId: "6" })).toThrow("isn't in ChannelStore");
+    found.delete("ChannelStore");
+    expect(() => navigate.channel("55")).toThrow("isn't in ChannelStore");
+    expect(went).toEqual([]);
+    // Told it's a DM, it goes there without asking ChannelStore
+    navigate.channel("55", { guildId: null });
+    expect(went).toEqual(["/channels/@me/55"]);
+});
+
+test("navigate refuses a path that could leave Discord's app, as rest does", () => {
+    const transitionTo = () => { };
+    transitionTo.toString = () => "function(e,t){log(`transitionTo - Transitioning to ${e}`)}";
+    exportsOnPage = [transitionTo];
+    for (const path of ["//example.com", "/\\example.com", "channels/@me", 5]) {
+        expect(() => navigate(path as string)).toThrow(`navigate: path must start with a single "/", got ${JSON.stringify(path)}`);
+    }
+});
+
+test("snowflake reads an id's time, makes the first id of a time, and sorts ids by age", () => {
+    // Discord's documented example: 175928847299117063 was made at 2016-04-30T11:18:25.796Z
+    expect(snowflake.time("175928847299117063")).toBe(Date.parse("2016-04-30T11:18:25.796Z"));
+    expect(snowflake.time("0")).toBe(1_420_070_400_000);
+    const at = Date.parse("2026-11-26T00:00:00Z");
+    expect(snowflake.time(snowflake.at(at))).toBe(at);
+    expect(snowflake.at(at + 0.9)).toBe(snowflake.at(at));
+    expect(BigInt(snowflake.at(at)) & ((1n << 22n) - 1n)).toBe(0n);
+    for (const bad of [NaN, Infinity, 1_420_070_399_999, 1_420_070_400_000 + 2 ** 42]) expect(() => snowflake.at(bad)).toThrow(RangeError);
+    // Beyond 2^53, where Number would round two ids into one
+    expect(snowflake.compare("18446744073709551614", "18446744073709551615")).toBe(-1);
+    expect(snowflake.compare("9", "10")).toBe(-1);
+    expect(snowflake.compare("10", "10")).toBe(0);
+    expect(["30", "4", "200"].sort(snowflake.compare)).toEqual(["4", "30", "200"]);
+    expect(snowflake.is("123")).toBe(true);
+    expect(snowflake.is("12a")).toBe(false);
+    expect(() => snowflake.time("x")).toThrow(TypeError);
+    expect(() => snowflake.compare("1", "-1")).toThrow(TypeError);
+});
+
+test("snowflake.is takes ids up to 2^64 - 1, and snowflake.assert names where a bad one came from", () => {
+    expect(snowflake.is("18446744073709551615")).toBe(true);
+    // 20 digits, but past an unsigned 64-bit number
+    expect(snowflake.is("18446744073709551616")).toBe(false);
+    expect(snowflake.is("99999999999999999999")).toBe(false);
+    expect(snowflake.is("123456789012345678901")).toBe(false);
+    expect(snowflake.is("")).toBe(false);
+    expect(snowflake.is(123)).toBe(false);
+    expect(() => snowflake.time("18446744073709551616")).toThrow("snowflake.time: id must be a Discord id");
+    expect(() => snowflake.compare("1", "18446744073709551616")).toThrow("snowflake.compare: right must be a Discord id");
+
+    expect(snowflake.assert("42", "kick: userId")).toBe("42");
+    expect(() => snowflake.assert("18446744073709551616", "kick: userId")).toThrow(TypeError);
+    expect(() => snowflake.assert("x", "kick: userId")).toThrow('kick: userId must be a Discord id (1 to 20 digits, at most 18446744073709551615), got "x"');
+    expect(() => snowflake.assert(null, "kick: userId")).toThrow("got null");
+    expect(() => snowflake.assert({}, "kick: userId")).toThrow("got an object");
+    expect(parseMessageLink("https://discord.com/channels/1/18446744073709551616")).toBeNull();
+    expect(() => format.messageLink("1", "18446744073709551616")).toThrow("format.messageLink: channelId must be a Discord id");
+});
+
+test("displayName takes the server nickname, then the display name, then the username, from a user or its id", () => {
+    found.set("UserStore", { getUser: (id: string) => id === ME ? { id: ME, username: "me", globalName: "Me!" } : id === ALT ? { id: ALT, username: "alt", globalName: null } : undefined });
+    found.set("GuildMemberStore", { getNick: (guildId: string, userId: string) => guildId === "9" && userId === ME ? "Nick" : null });
+    expect(displayName(ME)).toBe("Me!");
+    expect(displayName(ME, { guildId: "9" })).toBe("Nick");
+    expect(displayName(ME, { guildId: "8" })).toBe("Me!");
+    expect(displayName(ALT)).toBe("alt");
+    expect(displayName({ id: ALT, global_name: "From the API", username: "alt" })).toBe("From the API");
+    expect(displayName({ username: "no id" }, { guildId: "9" })).toBe("no id");
+    expect(displayName("404")).toBe("");
+    expect(displayName(undefined, { fallback: "Unknown" })).toBe("Unknown");
+    expect(displayName(null)).toBe("");
+    // A user Discord doesn't have loaded may still have a nickname in the server
+    found.set("GuildMemberStore", { getNick: () => "Member" });
+    expect(displayName("404", { guildId: "9" })).toBe("Member");
+    found.clear();
+    expect(displayName(ME, { guildId: "9", fallback: "?" })).toBe("?");
+});
+
+test("displayName puts a friend's nickname after the server nickname and before the display name", () => {
+    found.set("UserStore", { getUser: (id: string) => id === ME ? { id: ME, username: "me", globalName: "Me!" } : undefined });
+    found.set("GuildMemberStore", { getNick: (guildId: string) => guildId === "9" ? "Server nick" : null });
+    found.set("RelationshipStore", { getNickname: (id: string) => id === ME ? "Friend nick" : null });
+    expect(displayName(ME)).toBe("Friend nick");
+    expect(displayName(ME, { guildId: "9" })).toBe("Server nick");
+    expect(displayName(ME, { guildId: "8" })).toBe("Friend nick");
+    expect(displayName({ id: ME, global_name: "From the API", username: "me" })).toBe("Friend nick");
+    // Without an id there's no friend to look up
+    expect(displayName({ globalName: "No id", username: "x" })).toBe("No id");
+    // A Discord build before friend nicknames has no getNickname
+    found.set("RelationshipStore", {});
+    expect(displayName(ME)).toBe("Me!");
+    found.set("RelationshipStore", { getNickname: () => "" });
+    expect(displayName(ME)).toBe("Me!");
+});
+
+test("avatarUrl gives the user's uploaded avatar at a CDN size, else Discord's default for them", () => {
     expect(avatarUrl({ id: ME, avatar: "abc" })).toBe(`https://cdn.discordapp.com/avatars/${ME}/abc.webp?size=128`);
     expect(avatarUrl({ id: ME, avatar: "abc" }, 100)).toBe(`https://cdn.discordapp.com/avatars/${ME}/abc.webp?size=128`);
     expect(avatarUrl({ id: ME, avatar: "abc" }, 9000)).toBe(`https://cdn.discordapp.com/avatars/${ME}/abc.webp?size=4096`);
@@ -594,6 +896,11 @@ test("format.duration shows the largest units, and words them the same without I
     expect(format.duration(90_061_000, { units: 4 })).toBe("1 day, 1 hour, 1 minute, 1 second");
     expect(format.duration(400)).toBe("0 seconds");
     expect(format.duration(3_723_000, { style: "short" })).toBe("1 hr, 2 min");
+    // A units count that isn't a number is the default, not every unit or none
+    expect(format.duration(90_061_000, { units: NaN })).toBe("1 day, 1 hour");
+    expect(durationParts(90_061_000, NaN)).toEqual({ days: 1, hours: 1 });
+    expect(durationParts(90_061_000, Infinity)).toEqual({ days: 1, hours: 1 });
+    expect(durationParts(90_061_000, 0)).toEqual({ days: 1 });
 
     const intl = Intl as { DurationFormat?: unknown; };
     const real = intl.DurationFormat;
@@ -620,47 +927,61 @@ test("chat.insertText types into the open message box, and says when there's non
     expect(sent).toEqual([[true, "INSERT_TEXT", { plainText: "hi", rawText: "hi" }]]);
 });
 
-test("chat.localMessage shows Discord's own local message in the open channel, or the one named", () => {
+test("chat.localMessage shows Discord's local message in the open channel, or the one named", () => {
     const shown: unknown[][] = [];
     expect(() => chat.localMessage("hi", "9")).toThrow("aren't available");
     exportsOnPage = [{ sendMessage() { }, sendBotMessage: (...args: unknown[]) => void shown.push(args) }];
-    expect(() => chat.localMessage("hi")).toThrow("No channel");
+    expect(() => chat.localMessage("hi")).toThrow("chat.localMessage: no channel is open to show the message in");
     found.set("SelectedChannelStore", { getChannelId: () => "7" });
     chat.localMessage("hi");
     chat.localMessage("there", "9");
     expect(shown).toEqual([["7", "hi"], ["9", "there"]]);
 });
 
-/**
- * Discord's settings updater for the preloaded proto (type 1), saving to `groups`. `save` says what
- * Discord does after a change: confirm it, report an error, or say nothing.
- */
-function settingsUpdater(save: "confirm" | "error" | "silent" = "confirm") {
-    const groups: Record<string, any> = {};
-    const reloads: boolean[] = [];
-    const customStatusType = { create: (value: object) => ({ ...value, $typeName: "discord_protos.discord_users.v1.CustomStatus" }) };
-    const updater = {
-        ProtoClass: {
-            typeName: "discord_protos.discord_users.v1.PreloadedUserSettings",
-            fields: [{ name: "status", localName: "status", T: () => ({ fields: [{ name: "custom_status", localName: "customStatus", T: () => customStatusType }] }) }],
-        },
-        type: 1,
-        async updateAsync(group: string, change: (value: any) => unknown, delay: number, onError: (err: unknown) => void) {
-            expect(delay).toBe(0);
-            const value = structuredClone(groups[group] ?? {});
-            if (change(value) === false) return;
-            groups[group] = value;
-            if (save === "confirm") setTimeout(() => dispatcher.dispatch({ type: "USER_SETTINGS_PROTO_UPDATE", settings: { type: 1, proto: {} }, wasSaved: true }), 1);
-            if (save === "error") setTimeout(() => onError(new Error("HTTP 400")), 1);
-        },
-        async loadIfNecessary(force: boolean) {
-            reloads.push(force);
-        },
-    };
-    exportsOnPage = [updater];
-    found.set("UserSettingsProtoStore", { get settings() { return groups; } });
+/** What the settings updater does after a change: confirm it, report an error, say nothing, or throw */
+type SaveBehaviour = "confirm" | "error" | "silent" | "throw";
+let save: SaveBehaviour = "confirm";
+let groups: Record<string, any> = {};
+let reloads: boolean[] = [];
+const customStatusType = { create: (value: object) => ({ ...value, $typeName: "discord_protos.discord_users.v1.CustomStatus" }) };
+/** Discord's settings updater for the preloaded proto (type 1). mist-api keeps the one it finds: every test saves through this one. */
+const updater = {
+    ProtoClass: {
+        typeName: "discord_protos.discord_users.v1.PreloadedUserSettings",
+        fields: [{ name: "status", localName: "status", T: () => ({ fields: [{ name: "custom_status", localName: "customStatus", T: () => customStatusType }] }) }],
+    },
+    type: 1,
+    async updateAsync(group: string, change: (value: any) => unknown, delay: number, onError: (err: unknown) => void) {
+        expect(delay).toBe(0);
+        if (save === "throw") throw new Error("updater broke");
+        const value = structuredClone(groups[group] ?? {});
+        if (change(value) === false) return;
+        groups[group] = value;
+        if (save === "confirm") setTimeout(() => dispatcher.dispatch({ type: "USER_SETTINGS_PROTO_UPDATE", settings: { type: 1, proto: {} }, wasSaved: true }), 1);
+        if (save === "error") setTimeout(() => onError(new Error("HTTP 400")), 1);
+    },
+    async loadIfNecessary(force: boolean) {
+        reloads.push(force);
+    },
+};
+
+/** Puts the updater on the page, saving to fresh `groups` the way `behaviour` says */
+function settingsUpdater(behaviour: SaveBehaviour = "confirm") {
+    save = behaviour;
+    groups = {};
+    reloads = [];
+    const settings = groups;
+    exportsOnPage = [...exportsOnPage.filter(v => v !== updater), updater];
+    found.set("UserSettingsProtoStore", { get settings() { return settings; } });
     return { groups, reloads };
 }
+
+test("settings.update answers failed while Discord has no updater, and finds it once there is one", async () => {
+    // The first settings test: once found, the updater is kept
+    expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
+    settingsUpdater();
+    expect(await api.settings.update("preloaded", "status", value => { value.x = 1; })).toBe("saved");
+});
 
 test("settings.update changes a group with Discord's updater and resolves once Discord confirms the save", async () => {
     const { groups } = settingsUpdater();
@@ -670,19 +991,63 @@ test("settings.update changes a group with Discord's updater and resolves once D
     expect(subscribed()).toBe(0);
 });
 
-test("settings.update answers failed when Discord reports an error, doesn't confirm in time, or has no updater, and reloads after a failure", async () => {
-    expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
+test("settings.update answers failed when Discord refuses the save, and reloads to undo it", async () => {
     const { reloads } = settingsUpdater("error");
     expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
     expect(reloads).toEqual([true]);
-    settingsUpdater("silent");
-    expect(await api.settings.update("preloaded", "status", () => { }, { timeoutMs: 10 })).toBe("failed");
     expect(subscribed()).toBe(0);
     await expect(api.settings.update("other" as never, "status", () => { })).rejects.toThrow(TypeError);
 });
 
+test("settings.update that Discord doesn't confirm in time answers failed and leaves the save queued, without reloading", async () => {
+    const { groups, reloads } = settingsUpdater("silent");
+    expect(await api.settings.update("preloaded", "status", value => { value.status = { value: "idle" }; }, { timeoutMs: 10 })).toBe("failed");
+    expect(reloads).toEqual([]);
+    expect(groups.status.status).toEqual({ value: "idle" });
+    expect(subscribed()).toBe(0);
+});
+
+test("settings.update refuses a timeoutMs that isn't a count of ms setTimeout holds, before Discord's updater is called", async () => {
+    const { groups } = settingsUpdater();
+    const update = (timeoutMs: unknown) => api.settings.update("preloaded", "status", value => { value.x = 1; }, { timeoutMs: timeoutMs as number });
+    for (const timeoutMs of [NaN, "10"]) await expect(update(timeoutMs)).rejects.toThrow(TypeError);
+    // 3e9 is past 2^31 - 1 ms, which setTimeout would run at once
+    for (const timeoutMs of [0, -5, Infinity, 3e9, 2_147_483_648]) await expect(update(timeoutMs)).rejects.toThrow(RangeError);
+    await expect(update(3e9)).rejects.toThrow("settings.update: timeoutMs must be");
+    expect(groups).toEqual({});
+    expect(subscribed()).toBe(0);
+});
+
+test("settings.update takes the largest timeoutMs setTimeout holds, and clears its timer once saved", async () => {
+    settingsUpdater();
+    expect(await api.settings.update("preloaded", "status", value => { value.x = 1; }, { timeoutMs: 2_147_483_647 })).toBe("saved");
+    expect(subscribed()).toBe(0);
+});
+
+test("settings.update logs an error thrown by Discord's updater or by change, answers failed and reloads", async () => {
+    const { reloads } = settingsUpdater("throw");
+    const { lines, errors, reported } = await logging(async () => {
+        expect(await api.settings.update("preloaded", "status", () => { })).toBe("failed");
+        settingsUpdater();
+        expect(await api.settings.update("preloaded", "status", () => { throw new Error("change broke"); })).toBe("failed");
+    });
+    expect(messagesOf(errors)).toEqual(["updater broke", "change broke"]);
+    expect(lines).toEqual(["settings.update:", "settings.update:"]);
+    expect(reported).toBe(0);
+    expect(reloads).toEqual([true]);
+    expect(subscribed()).toBe(0);
+});
+
+test("settings.update types the group's value from its type argument", async () => {
+    settingsUpdater();
+    expect(await api.settings.update<{ status?: { value: string; }; }>("preloaded", "status", value => {
+        // @ts-expect-error status.value is a string
+        value.status = { value: 1 };
+    })).toBe("saved");
+});
+
 test("settings.update and status.set are held to changeSettings, before Discord's updater is called", async () => {
-    // declared() puts Discord's API client on the page, so the updater goes on after it
+    // declared() puts Discord's API client on the page: the updater goes on after it
     const { settings, status } = declared({ network: ["discord.com"] });
     const { groups } = settingsUpdater();
     expect(await refusal(settings.update("preloaded", "status", () => { }))).toMatchObject({ name: "PluginPermissionError", permission: "changeSettings" });
@@ -717,9 +1082,17 @@ test("status.set writes the custom status as Discord's proto type, and reads bac
 
 test("status.set refuses a status Discord wouldn't take", async () => {
     settingsUpdater();
-    for (const bad of [{ text: "x".repeat(129) }, { text: "" }, { text: "a", emojiId: "x" }, { text: "a", expiresAt: -1 }, "hi"]) {
+    for (const bad of [{ text: "x".repeat(129) }, { text: "" }, { text: "a", emojiId: "x" }, { text: "a", emojiId: "0" }, { text: "a", emojiId: "0123" }, { text: "a", emojiId: 123 }, { text: "a", expiresAt: -1 }, "hi"]) {
         await expect(api.status.set(bad as never)).rejects.toThrow(TypeError);
     }
+});
+
+test("a status set with a custom emoji reads back the same, and setting it again changes nothing", async () => {
+    settingsUpdater();
+    const status = { text: "a", emojiName: "party", emojiId: "123456789012345678" };
+    expect(await api.status.set(status)).toBe("saved");
+    expect(api.status.get()).toEqual(status);
+    expect(await api.status.set(status)).toBe("unchanged");
 });
 
 test("format.messageLink and parseMessageLink write and read Discord's message links", () => {

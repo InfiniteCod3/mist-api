@@ -1,6 +1,7 @@
 /** Guards for the arguments a native method gets from the page, which nothing checks across IPC. */
 import { NativeError } from "./errors.ts";
-import { isRecord } from "./util.ts";
+import { shownValue } from "./internal.ts";
+import { isRecord, isSnowflake } from "./util.ts";
 
 /** What `check` throws for an argument it refuses: `data.name` is the argument, `data.expected` what it had to be */
 export interface BadArgument {
@@ -13,9 +14,8 @@ function refuse(name: string, expected: string): never {
 }
 
 export interface TextOptions {
-    /** The most characters */
     max: number;
-    /** The fewest characters. Default 0 */
+    /** Default 0 */
     min?: number;
     /** The argument's name in the error. Default "value" */
     name?: string;
@@ -34,7 +34,6 @@ export interface HttpsOptions {
 }
 
 export interface ListOptions {
-    /** The most items */
     max: number;
     name?: string;
 }
@@ -52,7 +51,6 @@ const hostAllowed = (host: string, hosts: readonly string[]) => hosts.some(allow
  * which the page's call rejects with as a MistNativeError.
  */
 export const check = {
-    /** A string of `min` (default 0) to `max` characters */
     text(value: unknown, { max, min = 0, name = "value" }: TextOptions): string {
         if (typeof value !== "string" || value.length < min || value.length > max) refuse(name, min > 0 ? `a string of ${min} to ${max} characters` : `a string of at most ${max} characters`);
         return value;
@@ -60,7 +58,7 @@ export const check = {
 
     /** A Discord id: a string of 1 to 20 digits */
     id(value: unknown, name = "value"): string {
-        if (typeof value !== "string" || !/^\d{1,20}$/.test(value)) refuse(name, "a Discord id");
+        if (!isSnowflake(value)) refuse(name, "a Discord id");
         return value;
     },
 
@@ -77,16 +75,15 @@ export const check = {
 
     /** One of `list`, compared with === */
     oneOf<const T>(value: unknown, list: readonly T[], name = "value"): T {
-        if (!list.includes(value as T)) refuse(name, `one of ${list.map(item => JSON.stringify(item)).join(", ")}`);
+        if (!list.includes(value as T)) refuse(name, `one of ${list.map(shownValue).join(", ")}`);
         return value as T;
     },
 
     /** An https URL without a user name or password, on one of `hosts` when given. Returns it parsed. */
     https(value: unknown, { hosts, name = "value" }: HttpsOptions = {}): URL {
         const expected = hosts ? `an https URL on ${hosts.join(", ")}` : "an https URL";
-        if (typeof value !== "string" || value.length > MAX_URL || !URL.canParse(value)) refuse(name, expected);
-        const url = new URL(value);
-        if (url.protocol !== "https:" || url.username || url.password || (hosts && !hostAllowed(url.hostname, hosts))) refuse(name, expected);
+        const url = typeof value === "string" && value.length <= MAX_URL ? URL.parse(value) : null;
+        if (!url || url.protocol !== "https:" || url.username || url.password || (hosts && !hostAllowed(url.hostname, hosts))) refuse(name, expected);
         return url;
     },
 

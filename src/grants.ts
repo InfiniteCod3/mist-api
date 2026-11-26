@@ -1,11 +1,9 @@
 /**
  * Paths the person picked in a file dialog, handed to the page as opaque handles. The page can hold
- * and pass a handle back, but only the native side turns it into a path, so page code can't make
+ * and pass a handle back, but only the native side turns it into a path: page code can't make
  * native code read or write a path nobody picked.
  */
 import type { NativeContext } from "@evi/api/native";
-// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
-// import of a part the mock lacks would fail to link before any of mist runs
 import * as electron from "electron";
 import type { OpenDialogOptions } from "electron";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -45,18 +43,21 @@ export interface PathGrants {
 
 const HANDLE = /^grant:[0-9a-f-]{36}$/;
 
+const isGrant = (value: unknown): value is Grant =>
+    isRecord(value) && (value.kind === "file" || value.kind === "folder") && typeof value.path === "string" && isAbsolute(value.path);
+
+/** The well-formed grants of what `mist-grants.json` holds; anything else is dropped */
+function parseGrants(raw: unknown): Record<string, Grant> {
+    if (!isRecord(raw)) return {};
+    return Object.fromEntries(Object.entries(raw).filter(([handle, grant]) => HANDLE.test(handle) && isGrant(grant))) as Record<string, Grant>;
+}
+
 /**
- * Path grants kept in `mist-grants.json` in the plugin's folder, so a handle the page saved still
+ * Path grants kept in `mist-grants.json` in the plugin's folder. A handle the page saved still
  * resolves after Discord restarts, until it's revoked.
  */
 export function pathGrants(ctx: NativeContext): PathGrants {
-    const file = openJson<Record<string, Grant>>(ctx, "mist-grants", {
-        initial: {},
-        parse: raw => isRecord(raw)
-            ? Object.fromEntries(Object.entries(raw).filter(([handle, g]) => HANDLE.test(handle) && isRecord(g) && (g.kind === "file" || g.kind === "folder") && typeof g.path === "string" && isAbsolute(g.path))) as Record<string, Grant>
-            : {},
-        debounceMs: 0,
-    });
+    const file = openJson<Record<string, Grant>>(ctx, "mist-grants", { initial: {}, parse: parseGrants, debounceMs: 0 });
 
     async function pick(kind: Grant["kind"], { title, buttonLabel, defaultPath, filters }: PickOptions = {}): Promise<GrantHandle | null> {
         const options: OpenDialogOptions = { title, buttonLabel, defaultPath, filters, properties: [kind === "file" ? "openFile" : "openDirectory"] };
@@ -71,7 +72,7 @@ export function pathGrants(ctx: NativeContext): PathGrants {
 
     const lookup = (handle: unknown) => {
         const grant = typeof handle === "string" && HANDLE.test(handle) ? file.get()[handle] : undefined;
-        if (!grant) throw new NativeError("unknown-grant", undefined, "No such path grant");
+        if (!grant) throw new NativeError("unknown-grant", undefined, "resolveGrant: no such path grant");
         return grant;
     };
 
@@ -81,11 +82,11 @@ export function pathGrants(ctx: NativeContext): PathGrants {
         resolveGrant(handle, ...segments) {
             const grant = lookup(handle);
             if (!segments.length) return grant.path;
-            if (grant.kind === "file") throw new NativeError("outside-grant", undefined, "A file grant has nothing inside it");
-            if (!segments.every(s => typeof s === "string")) throw new NativeError("outside-grant", undefined, "Path segments are strings");
+            if (grant.kind === "file") throw new NativeError("outside-grant", undefined, "resolveGrant: a file grant has nothing inside it");
+            if (!segments.every(s => typeof s === "string")) throw new NativeError("outside-grant", undefined, "resolveGrant: path segments must be strings");
             const full = resolve(grant.path, ...segments as string[]);
             const rel = relative(grant.path, full);
-            if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new NativeError("outside-grant", undefined, "That path is outside the granted folder");
+            if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new NativeError("outside-grant", undefined, "resolveGrant: that path is outside the granted folder");
             return full;
         },
         revokeGrant(handle) {

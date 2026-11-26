@@ -1,22 +1,23 @@
-/** A plugin's own folder under Evi's data folder, and JSON files in it that survive a crash mid-write. */
+/** A plugin's data folder under Evi's data folder, and JSON files in it that survive a crash mid-write. */
 import type { NativeContext } from "@evi/api/native";
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { unlink, writeFile } from "node:fs/promises";
+import { rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { NativeError } from "./errors.ts";
-import { log } from "./native.ts";
+import { checkDelay, checkNumber, errorMessage, jsonText, shownValue } from "./internal.ts";
+import { log } from "./native-log.ts";
 import { atQuit } from "./quit.ts";
 
 const SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
 /**
- * The plugin's own folder, `<ctx.dataDir>/plugin-data/<plugin id>`, made if missing. `ctx.dataDir` is
- * Evi's data folder, shared by Evi and every plugin; its `plugins` folder holds installed plugins'
- * code, so plugin data stays out of it.
+ * The plugin's data folder, `<ctx.dataDir>/plugin-data/<plugin id>`, made if missing. `ctx.dataDir`
+ * is Evi's data folder, shared by Evi and every plugin. Its `plugins` folder holds installed plugins'
+ * code: plugin data stays out of it.
  */
 export function dataFolder(ctx: NativeContext): string {
-    if (!SAFE_NAME.test(ctx.pluginId)) throw new Error(`Can't make a folder for plugin id ${JSON.stringify(ctx.pluginId)}`);
+    if (!SAFE_NAME.test(ctx.pluginId)) throw new TypeError(`dataFolder: can't make a folder for plugin id ${shownValue(ctx.pluginId)}`);
     const dir = join(ctx.dataDir, "plugin-data", ctx.pluginId);
     mkdirSync(dir, { recursive: true });
     return dir;
@@ -25,14 +26,26 @@ export function dataFolder(ctx: NativeContext): string {
 let tmpCount = 0;
 const tmpPath = (path: string) => `${path}.${process.pid}.${++tmpCount}.tmp`;
 
-/** Writes `text` to a temporary file and renames it over `path`, so a reader sees the old file or the new one, never half */
-export function writeAtomicSync(path: string, text: string) {
+/** Writes `content` to a temporary file and renames it over `path`: a reader sees the old file or the new one, never half */
+export function writeAtomicSync(path: string, content: string | Uint8Array): void {
     const tmp = tmpPath(path);
     try {
-        writeFileSync(tmp, text);
+        writeFileSync(tmp, content);
         renameSync(tmp, path);
     } catch (err) {
         try { unlinkSync(tmp); } catch { }
+        throw err;
+    }
+}
+
+/** writeAtomicSync without blocking main while the file is written */
+export async function writeAtomic(path: string, content: string | Uint8Array): Promise<void> {
+    const tmp = tmpPath(path);
+    try {
+        await writeFile(tmp, content);
+        await rename(tmp, path);
+    } catch (err) {
+        await unlink(tmp).catch(() => { });
         throw err;
     }
 }
@@ -61,26 +74,27 @@ export interface JsonFile<T> {
     flush(): Promise<void>;
 }
 
-const jsonType = (value: unknown) => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+function jsonType(value: unknown) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    return typeof value;
+}
 
 /**
- * A JSON file in the plugin's own folder (dataFolder), read once when made and kept in memory.
- * Writes go to a temporary file renamed over the old one. A pending write is flushed when the
- * native side stops and when Discord quits. A file that can't be parsed, or doesn't have the shape
- * `parse` wants, is renamed to `<name>.json.bad`, and the value starts from `initial`. A file that
- * can't be read at all (locked, no access, over maxBytes) is left alone, and get and set throw a
- * NativeError "file-unreadable" until a later try reads it.
- * Every jsonFile of one name in a native run is the same object, made with the first call's options.
+ * A JSON file in the plugin's folder, read once and kept in memory, written atomically and flushed on
+ * stop and quit. An unparseable file is renamed to `<name>.json.bad` and the value starts from
+ * `initial`; one that can't be read or moved aside is left alone, and get and set throw a NativeError
+ * "file-unreadable" until it can be. Each name gives one shared object per native run.
  */
 export function jsonFile<T>(ctx: NativeContext, name: string, options: JsonFileOptions<T>): JsonFile<T> {
-    if (!SAFE_NAME.test(name) || name.startsWith("mist-")) throw new Error(`Bad file name ${JSON.stringify(name)}: use letters, digits, _ . and -, not starting with mist-`);
+    if (typeof name !== "string" || !SAFE_NAME.test(name) || name.startsWith("mist-")) throw new TypeError(`jsonFile: bad file name ${shownValue(name)}. Use letters, digits, _ . and -, not starting with mist-.`);
     return openJson(ctx, name, options);
 }
 
-/** The files open in each native run, by path, so two helpers for one file share its value and writes */
+/** The files open in each native run, by path: two helpers for one file share its value and writes */
 const open = new WeakMap<NativeContext, Map<string, JsonFile<unknown>>>();
 
-/** jsonFile without the name check, for mist's own `mist-` files */
+/** jsonFile without the name check, for mist's `mist-` files */
 export function openJson<T>(ctx: NativeContext, name: string, options: JsonFileOptions<T>): JsonFile<T> {
     const path = join(dataFolder(ctx), `${name}.json`);
     let files = open.get(ctx);
@@ -92,6 +106,8 @@ export function openJson<T>(ctx: NativeContext, name: string, options: JsonFileO
 
 function makeJson<T>(ctx: NativeContext, name: string, path: string, options: JsonFileOptions<T>): JsonFile<T> {
     const { initial, maxBytes = 5 * 1024 * 1024, debounceMs = 500 } = options;
+    checkNumber("jsonFile", "maxBytes", maxBytes, { min: 1, integer: true });
+    checkDelay("jsonFile", "debounceMs", debounceMs);
     const parse = options.parse ?? ((raw: unknown) => {
         if (jsonType(raw) !== jsonType(initial)) throw new TypeError(`expected ${jsonType(initial)}, found ${jsonType(raw)}`);
         return raw as T;
@@ -111,16 +127,23 @@ function makeJson<T>(ctx: NativeContext, name: string, path: string, options: Js
         } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
             if (code === "ENOENT") return;
-            failure = new NativeError("file-unreadable", { file: `${name}.json` }, `${name}.json couldn't be read (${code ?? (err as Error).message}); it's left as it is, and reading or changing it throws until it can be read`);
+            failure = unreadable(code ?? errorMessage(err));
             return;
         }
         try {
             value = parse(JSON.parse(raw));
         } catch (err) {
-            log.warn(`Couldn't parse ${path}, kept as ${name}.json.bad; starting from the initial value`, err);
-            try { renameSync(path, `${path}.bad`); } catch { }
+            try {
+                renameSync(path, `${path}.bad`);
+            } catch (renameErr) {
+                // Starting from `initial` now would let the next write replace the file nobody could move aside
+                failure = unreadable(`unparseable, and moving it to ${name}.json.bad failed: ${(renameErr as NodeJS.ErrnoException).code ?? errorMessage(renameErr)}`);
+                return;
+            }
+            log.warn(`jsonFile: couldn't parse ${path}. Kept it as ${name}.json.bad and started from the initial value.`, err);
         }
     }
+    const unreadable = (why: string) => new NativeError("file-unreadable", { file: `${name}.json` }, `jsonFile: ${name}.json couldn't be read (${why}). It's left untouched until it can be read.`);
     load();
     if (failure) log.error(failure.message);
     /** Throws while the file can't be read, trying it again first */
@@ -149,7 +172,7 @@ function makeJson<T>(ctx: NativeContext, name: string, path: string, options: Js
             written = at;
         } catch (err) {
             await unlink(tmp).catch(() => { });
-            log.error(`Couldn't write ${path}`, err);
+            log.error(`jsonFile: couldn't write ${path}`, err);
         }
     }
 
@@ -161,7 +184,7 @@ function makeJson<T>(ctx: NativeContext, name: string, path: string, options: Js
             writeAtomicSync(path, text);
             written = version;
         } catch (err) {
-            log.error(`Couldn't write ${path}`, err);
+            log.error(`jsonFile: couldn't write ${path}`, err);
         }
     }
 
@@ -177,10 +200,9 @@ function makeJson<T>(ctx: NativeContext, name: string, path: string, options: Js
         set(next) {
             usable();
             const updated = typeof next === "function" ? (next as (current: T) => T)(value) : next;
-            const serialized = JSON.stringify(updated);
-            if (serialized === undefined) throw new TypeError(`${name}.json can't hold ${typeof updated}`);
+            const serialized = jsonText(`jsonFile: ${name}.json`, updated);
             const bytes = Buffer.byteLength(serialized);
-            if (bytes > maxBytes) throw new RangeError(`${name}.json would be ${bytes} bytes, over maxBytes (${maxBytes})`);
+            if (bytes > maxBytes) throw new RangeError(`jsonFile: ${name}.json would be ${bytes} bytes, over maxBytes (${maxBytes})`);
             value = updated;
             text = serialized;
             version++;

@@ -22,7 +22,7 @@ const TOKEN_COUNT = /tokens$/i;
 export type SecretTest = (key: string, value: unknown) => boolean;
 
 /**
- * Whether a field or Map entry holds a secret: one of the plugin's own `secrets`, or a built-in name
+ * Whether a field or Map entry holds a secret: one of the plugin's `secrets`, or a built-in name
  * the plugin didn't `reveal`, other than a token count
  */
 export function secretTest(secrets: readonly string[] = [], reveal: readonly string[] = []): SecretTest {
@@ -31,7 +31,7 @@ export function secretTest(secrets: readonly string[] = [], reveal: readonly str
     return (key, value) => {
         const name = key.toLowerCase();
         if (own.has(name)) return true;
-        if (shown.has(name) || typeof value === "number" && TOKEN_COUNT.test(key)) return false;
+        if (shown.has(name) || (typeof value === "number" && TOKEN_COUNT.test(key))) return false;
         return SECRET_NAMES.test(key);
     };
 }

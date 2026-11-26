@@ -1,6 +1,6 @@
 /** mist flux: a watch on Discord's Flux dispatcher, kept in the page and drained by the CLI */
-import { CdpError, evaluate, type Send } from "./cdp.ts";
-import { type Limits, pageExpression } from "./page.ts";
+import { type Send, sleep, watchId } from "./cdp.ts";
+import { type Limits, type PageError, type PageGlobal, pageCall, WATCH_TTL_MS } from "./page.ts";
 
 export interface FluxRecord { type: string; at: number; payload: unknown; }
 export interface FluxBatch { records: FluxRecord[]; dropped: number; alive: boolean; }
@@ -15,39 +15,54 @@ interface StartOptions {
     limits: Limits;
 }
 
+type Action = { type: string; };
+type Handler = (action: Action) => unknown;
+interface Dispatcher {
+    subscribe(type: string, fn: Handler): void;
+    unsubscribe(type: string, fn: Handler): void;
+    addInterceptor(fn: Handler): void;
+    _interceptors?: Handler[];
+}
+interface FluxWatch { buffer: FluxRecord[]; dropped: number; kept: number; last: number; stop(): void; }
+type FluxPage = PageGlobal<{ Evi: { api: { Dispatcher: Dispatcher; }; }; [watches: symbol]: Map<string, FluxWatch> | undefined; }>;
+
 /**
  * Page side. Named types go through Dispatcher.subscribe; every action needs an interceptor, which
  * Discord's dispatcher calls before any handler and skips the action when it returns true. The
  * watch lives under a Symbol.for key so the CLI's next evaluate finds it.
  */
-function start(snapshot: (value: unknown, limits: Limits) => unknown, id: string, options: StartOptions) {
+function start(snapshot: (value: unknown, limits: Limits) => unknown, id: string, options: StartOptions): PageError | null {
     const KEEP = 1000;
-    const D = (globalThis as any).Evi.api.Dispatcher;
-    const watches: Map<string, any> = (globalThis as any)[Symbol.for("mist-cli.flux")] ??= new Map();
-    const watch = { buffer: [] as FluxRecord[], dropped: 0, kept: 0, last: Date.now(), stop: () => { } };
+    const page = globalThis as FluxPage;
+    const dispatcher = page.Evi.api.Dispatcher;
+    const watches = page[Symbol.for("mist-cli.flux")] ??= new Map<string, FluxWatch>();
+    const watch: FluxWatch = { buffer: [], dropped: 0, kept: 0, last: Date.now(), stop: () => { } };
     let remove: () => void;
-    const record = (action: { type: string; }) => {
+    const record = (action: Action) => {
         if (options.limit !== null && watch.kept >= options.limit) return;
         try {
             const { type, ...payload } = action;
             watch.buffer.push({ type, at: Date.now(), payload: snapshot(payload, options.limits) });
-        } catch { }
-        watch.kept++;
+            watch.kept++;
+        } catch {
+            watch.dropped++;
+        }
         if (watch.buffer.length > KEEP) watch.dropped += watch.buffer.splice(0, watch.buffer.length - KEEP).length;
     };
     if (options.types.length) {
-        for (const type of options.types) D.subscribe(type, record);
-        remove = () => { for (const type of options.types) D.unsubscribe(type, record); };
+        for (const type of options.types) dispatcher.subscribe(type, record);
+        remove = () => { for (const type of options.types) dispatcher.unsubscribe(type, record); };
     } else {
-        if (!Array.isArray(D._interceptors)) return "This Discord's dispatcher keeps no interceptor list, so mist can't watch every action. Name the action types.";
-        const intercept = (action: { type: string; }) => {
+        const interceptors = dispatcher._interceptors;
+        if (!Array.isArray(interceptors)) return { error: "mist can't watch every action: this Discord's dispatcher keeps no interceptor list. Name the action types." };
+        const intercept = (action: Action) => {
             record(action);
             return false;
         };
-        D.addInterceptor(intercept);
+        dispatcher.addInterceptor(intercept);
         remove = () => {
-            const at = D._interceptors.indexOf(intercept);
-            if (at >= 0) D._interceptors.splice(at, 1);
+            const at = interceptors.indexOf(intercept);
+            if (at >= 0) interceptors.splice(at, 1);
         };
     }
     const watchdog = setInterval(() => { if (Date.now() - watch.last > options.ttlMs) watch.stop(); }, Math.max(10, options.ttlMs / 4));
@@ -61,7 +76,7 @@ function start(snapshot: (value: unknown, limits: Limits) => unknown, id: string
 }
 
 function take(id: string): FluxBatch {
-    const watch = (globalThis as any)[Symbol.for("mist-cli.flux")]?.get(id);
+    const watch = (globalThis as FluxPage)[Symbol.for("mist-cli.flux")]?.get(id);
     if (!watch) return { records: [], dropped: 0, alive: false };
     watch.last = Date.now();
     const records = watch.buffer.splice(0);
@@ -70,14 +85,14 @@ function take(id: string): FluxBatch {
     return { records, dropped, alive: true };
 }
 
-function stop(id: string) {
-    const watches = (globalThis as any)[Symbol.for("mist-cli.flux")];
+function stop(id: string): number {
+    const watches = (globalThis as FluxPage)[Symbol.for("mist-cli.flux")];
     watches?.get(id)?.stop();
     return watches?.size ?? 0;
 }
 
 /** Undoes `start` in the page; safe to call again */
-export const stopFlux = (send: Send, id: string) => evaluate<number>(send, pageExpression(stop, [id]));
+export const stopFlux = (send: Send, id: string) => pageCall(send, stop, [id]);
 
 export interface WatchOptions {
     types: string[];
@@ -96,15 +111,14 @@ export interface WatchOptions {
  * the listener itself `ttlMs` after the last drain.
  */
 export async function watchFlux(send: Send, options: WatchOptions, onBatch: (batch: FluxBatch) => void): Promise<void> {
-    const { types, count, limits, pollMs = 250, ttlMs = 15_000, stopped = () => false } = options;
-    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const refused = await evaluate<string | null>(send, pageExpression(start, [id, { types, limit: count, ttlMs, limits } satisfies StartOptions], true));
-    if (refused) throw new CdpError(refused);
+    const { types, count, limits, pollMs = 250, ttlMs = WATCH_TTL_MS, stopped = () => false } = options;
+    const id = watchId();
+    await pageCall(send, start, [id, { types, limit: count, ttlMs, limits } satisfies StartOptions], true);
     let printed = 0;
     try {
         while (!stopped() && (count === null || printed < count)) {
-            await new Promise(resolve => setTimeout(resolve, pollMs));
-            const batch = await evaluate<FluxBatch>(send, pageExpression(take, [id]));
+            await sleep(pollMs);
+            const batch = await pageCall(send, take, [id]);
             if (count !== null) batch.records = batch.records.slice(0, count - printed);
             printed += batch.records.length;
             onBatch(batch);

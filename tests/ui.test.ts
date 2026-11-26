@@ -11,12 +11,17 @@ import { mistNative } from "./helpers";
 
 const evi = fakeEvi({ React });
 /** Evi's Components: what each test puts in `discordComponents`, read when a control renders */
-let discordComponents: { Button?: unknown; Tooltip?: unknown; } = {};
-const Components = { get Button() { return discordComponents.Button; }, get Tooltip() { return discordComponents.Tooltip; } };
+let discordComponents: { Button?: unknown; Tooltip?: unknown; Switch?: unknown; } = {};
+const Components = {
+    get Button() { return discordComponents.Button; },
+    get Tooltip() { return discordComponents.Tooltip; },
+    get Switch() { return discordComponents.Switch; },
+};
 const eviApi = () => ({ ...evi.module, Components, find: () => undefined, filters: { ...evi.module.filters, componentByCode: () => () => false } });
 mock.module("@evi/api", eviApi);
 mock.module("mist-test-evi-api", eviApi);
 const ui = await import("../src/ui");
+const { logOnce } = await import("../src/ui/shared");
 const { createMist } = await import("../src/index");
 const { subscribe, useStore } = await import("../src/stores");
 
@@ -146,6 +151,32 @@ test("state notifies on a new value, not on the same one, and works with subscri
     act(() => count.set(5));
     expect(root.toJSON()).toMatchObject({ children: ["5/50"] });
     act(() => root.unmount());
+});
+
+test("state's use() and onChange() work as mist.data's do: use re-renders, onChange hears each new value until removed", () => {
+    const count = ui.state(1);
+    const heard: number[] = [];
+    const off = count.onChange(value => heard.push(value));
+    count.set(2);
+    count.set(2);
+    count.update(n => n * 10);
+    off();
+    count.set(30);
+    expect(heard).toEqual([2, 20]);
+
+    // A listener that throws doesn't keep the next one from hearing
+    const after: number[] = [];
+    const offThrows = count.onChange(() => { throw new Error("listener broke"); });
+    const offAfter = count.onChange(value => after.push(value));
+    quietly(() => count.set(31));
+    expect(after).toEqual([31]);
+    offThrows();
+    offAfter();
+
+    const root = render(h(() => h("span", null, `${count.use()}`)));
+    expect(text(root)).toBe("31");
+    act(() => count.set(32));
+    expect(text(root)).toBe("32");
 });
 
 test("a host renders what the running plugin set, nothing once it stops, and is one component in every copy of mist-api", () => {
@@ -298,18 +329,20 @@ test("a send listener that cancels keeps the message in the box, and later liste
     act(() => run.dispose());
 });
 
-test("a send listener that throws or sets a non-string content is logged once, and the message goes on as it was", async () => {
+test("a send listener that throws or sets a non-string content is logged once, and the message goes on without its changes", async () => {
     const { sent, go } = sendFixture();
     const { mist, run } = plugin("t-send-throws");
     ui.messages.beforeSend(mist, "a-throws", draft => { draft.content = "lost"; throw new Error("listener broke"); });
     ui.messages.beforeSend(mist, "b-number", draft => { (draft as { content: unknown; }).content = 42; });
     await go("one");
     await go("two");
-    expect(sent).toEqual(["lost", "lost"]);
+    expect(sent).toEqual(["one", "two"]);
     expect(errors(run).map(l => l.args[0])).toEqual([
-        "t-send-throws/a-throws threw before a message went out; the message goes on",
+        "t-send-throws/a-throws threw before a message went out; the message goes on without its changes",
         "t-send-throws/b-number set the message's content to something other than a string; keeping the content it had",
     ]);
+    // The thrown error goes with its line; a bad content has no error to pass on
+    expect(errors(run).map(l => l.args.length)).toEqual([2, 1]);
     act(() => run.dispose());
 });
 
@@ -344,7 +377,7 @@ test("with no listeners a message isn't held up: the patched code gets false, no
 
 test("a registry key held by an incompatible copy fails loudly instead of sharing the wrong shape", () => {
     Object.defineProperty(globalThis, Symbol.for("mist-api.ui/host/t-incompatible@1"), { value: { protocol: 1 }, configurable: true });
-    expect(() => ui.host("t-incompatible")).toThrow("mist ui: mist-api.ui/host/t-incompatible@1 was made by an incompatible copy");
+    expect(() => ui.host("t-incompatible")).toThrow("The UI state mist-api.ui/host/t-incompatible@1 was made by an incompatible copy of mist-api");
 });
 
 test("adding UI to a mist whose plugin isn't running throws", () => {
@@ -384,12 +417,12 @@ test("hooks that see message content need readMessages in a manifest that declar
     act(() => { run.dispose(); reader.run.dispose(); });
 });
 
-test("a registry takes only the plugin's own mist object, so one plugin can't add under another's id", () => {
+test("a registry takes only the plugin's mist object, so one plugin can't add under another's id", () => {
     const victim = plugin("t-owner-victim");
     const forged = { id: "t-owner-victim", ctx: victim.run.ctx, log: victim.mist.log };
     for (const owner of [forged, "t-owner-victim", victim.run.ctx, null]) {
         expect(() => ui.messages.beforeSend(owner as never, "x", () => { })).toThrow(TypeError);
-        expect(() => other.chatBar.add(owner as never, "x", () => null)).toThrow("chatBar.add takes the plugin's own mist object");
+        expect(() => other.chatBar.add(owner as never, "x", () => null)).toThrow("chatBar.add takes the mist object from createMist");
     }
     // A mist that Evi hasn't loaded
     const unknown = createMist("t-owner-unknown");
@@ -451,7 +484,7 @@ function discordButton() {
     return { Button, got };
 }
 
-test("Button uses Discord's own button with its colour and size, and a styled plain button without it", () => {
+test("Button uses Discord's button with its colour and size, and a styled plain button without it", () => {
     const { Button, got } = discordButton();
     discordComponents = { Button };
     try {
@@ -511,6 +544,8 @@ test("the stylesheet is added once, however many pieces are mounted, and removed
         expect(page.head).toHaveLength(1);
         expect(page.head[0].dataset.mist).toBe("ui");
         expect(page.head[0].textContent).toContain(".mist-button");
+        expect(page.head[0].textContent).toContain(".mist-switch[aria-checked=\"true\"]");
+        expect(page.head[0].textContent).toContain(".mist-input[aria-invalid=\"true\"]");
         expect(page.head[0].textContent).toContain("var(--");
         act(() => a.unmount());
         expect(page.head).toHaveLength(1);
@@ -523,4 +558,213 @@ test("the stylesheet is added once, however many pieces are mounted, and removed
     } finally {
         page.restore();
     }
+});
+
+test("a host's set after its component threw shows the new component, not the old fallback", () => {
+    const Panel = ui.host("t-host/reload");
+    const first = fakeContext({ id: "t-host-reload" });
+    Panel.set(first.ctx, () => { throw new Error("old run"); }, { fallback: h("em", null, "unavailable") });
+    const root = quietly(() => render(h(Panel.Component)));
+    expect(text(root)).toBe("unavailable");
+
+    // The reloaded plugin sets its fixed component under the same host
+    const second = fakeContext({ id: "t-host-reload" });
+    act(() => void other.host("t-host/reload").set(second.ctx, () => h("h1", null, "fixed")));
+    expect(text(root)).toBe("fixed");
+    act(() => { first.dispose(); second.dispose(); });
+});
+
+test("adding an entry again under the id of one that threw renders the new entry instead of the old fallback", () => {
+    const ChatBar = load(patch(chatBarModule, ui.chatBar.patches), { jsx }).A;
+    const { mist, run } = plugin("t-chat-reload");
+    ui.chatBar.add(mist, "b", () => { throw new Error("old run"); }, { fallback: h("oops") });
+    const root = quietly(() => render(h(ChatBar, { channel: { id: "1" } })));
+    const types = () => (root.toJSON() as { children: { type: string; }[]; }).children.map(c => c.type);
+    expect(types()).toEqual(["app-launcher", "oops", "send"]);
+    act(() => void ui.chatBar.add(mist, "b", () => h("fixed")));
+    expect(types()).toEqual(["app-launcher", "fixed", "send"]);
+    act(() => run.dispose());
+});
+
+test("a button entry with fallback: undefined renders nothing when it throws, as one without the option does", () => {
+    const ChatBar = load(patch(chatBarModule, ui.chatBar.patches), { jsx }).A;
+    const { mist, run } = plugin("t-chat-undefined");
+    ui.chatBar.add(mist, "broken", () => { throw new Error("broken button"); }, { fallback: undefined });
+    const root = quietly(() => render(h(ChatBar, { channel: { id: "1" } })));
+    expect((root.toJSON() as { children: { type: string; }[]; }).children.map(c => c.type)).toEqual(["app-launcher", "send"]);
+    act(() => run.dispose());
+});
+
+test("a send listener that times out can't change the message when it finishes later, while the next listener runs", async () => {
+    jest.useFakeTimers();
+    try {
+        const { sent, go } = sendFixture();
+        const { mist, run } = plugin("t-send-late");
+        const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+        let seen: string | undefined;
+        ui.messages.beforeSend(mist, "a-slow", async draft => { await sleep(6000); draft.content = "late"; });
+        ui.messages.beforeSend(mist, "b-next", async draft => {
+            seen = draft.content;
+            await sleep(2000);
+            draft.content += "!";
+        });
+        const ticks = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+        const going = go("one");
+        await ticks();
+        jest.advanceTimersByTime(5000);
+        await ticks();
+        // a-slow finishes while b-next is still running
+        jest.advanceTimersByTime(1000);
+        await ticks();
+        jest.advanceTimersByTime(1000);
+        await going;
+        expect(seen).toBe("one");
+        expect(sent).toEqual(["one!"]);
+        act(() => run.dispose());
+    } finally {
+        jest.useRealTimers();
+    }
+});
+
+test("after 50 distinct errors a plugin's log says further errors are suppressed, once", () => {
+    const logged: unknown[][] = [];
+    const mist = { log: { error: (...args: unknown[]) => void logged.push(args) } };
+    const Throws = ({ n }: { n: number; }) => { throw new Error(`error ${n}`); };
+    quietly(() => render(h("div", null, ...Array.from({ length: 52 }, (_, n) => h(ui.Boundary, { key: n, mist, fallback: null }, h(Throws, { n }))))));
+    expect(logged).toHaveLength(51);
+    expect(logged.slice(0, 50).every(args => args[0] === "A component threw while rendering; showing its fallback")).toBe(true);
+    expect(logged[50]).toEqual(["mist-api/ui: 50 distinct errors logged; further errors suppressed"]);
+});
+
+test("logOnce passes an error only when given one, tells a line with an error from the same line without, and caps each log", () => {
+    const logged: unknown[][] = [];
+    const log = { error: (...args: unknown[]) => void logged.push(args) };
+    const err = new Error("boom");
+    logOnce(log, "plain");
+    logOnce(log, "plain");
+    logOnce(log, "plain", err);
+    logOnce(log, "plain", new Error("boom"));
+    logOnce(log, "plain", undefined);
+    expect(logged).toEqual([["plain"], ["plain", err], ["plain", undefined]]);
+
+    for (let n = 0; n < 60; n++) logOnce(log, `line ${n}`);
+    expect(logged).toHaveLength(51);
+    expect(logged[50]).toEqual(["mist-api/ui: 50 distinct errors logged; further errors suppressed"]);
+
+    // Another log has its own count
+    const fresh: unknown[][] = [];
+    logOnce({ error: (...args: unknown[]) => void fresh.push(args) }, "line 0");
+    expect(fresh).toEqual([["line 0"]]);
+});
+
+/** Discord's switch, recording the props it got */
+function discordSwitch() {
+    const got: Record<string, unknown>[] = [];
+    const Switch = (props: Record<string, unknown>) => (got.push(props), h("input", { type: "checkbox", id: props.id as string }));
+    return { Switch, got };
+}
+
+test("Switch without Discord's is a labelled role=switch button that toggles, and a disabled one can't be pressed", () => {
+    const changes: boolean[] = [];
+    const root = render(h(ui.Switch, { id: "rain", checked: false, onChange: v => void changes.push(v), label: "Rain alerts", description: "When it starts raining", className: "mine" }));
+    const button = root.root.findByType("button");
+    expect(button.props).toMatchObject({
+        type: "button", role: "switch", id: "rain", className: "mist-switch", "aria-checked": false,
+        "aria-labelledby": "rain-label", "aria-describedby": "rain-description", disabled: false,
+    });
+    expect(root.root.findByType("label").props).toMatchObject({ id: "rain-label", htmlFor: "rain" });
+    expect(root.root.findByProps({ className: "mist-switch-row mine" })).toBeTruthy();
+    expect(text(root)).toBe("Rain alertsWhen it starts raining");
+    act(() => button.props.onClick());
+    expect(changes).toEqual([true]);
+
+    const on = render(h(ui.Switch, { checked: true, onChange() { }, disabled: true, "aria-label": "Rain alerts", className: "mine" })).root.findByType("button");
+    expect(on.props).toMatchObject({ "aria-checked": true, "aria-label": "Rain alerts", disabled: true, className: "mist-switch mine" });
+
+    // Without an id, the label still points at the generated one
+    const generated = render(h(ui.Switch, { checked: false, onChange() { }, label: "Snow" })).root;
+    expect(generated.findByType("button").props["aria-labelledby"]).toBe(generated.findByType("label").props.id);
+    expect(generated.findByType("label").props.htmlFor).toBe(generated.findByType("button").props.id);
+});
+
+test("Switch uses Discord's switch, named by its label or a hidden aria-label, and its own when there's no name to give it", () => {
+    const { Switch, got } = discordSwitch();
+    discordComponents = { Switch };
+    try {
+        const onChange = () => { };
+        render(h(ui.Switch, { id: "rain", checked: true, onChange, label: "Rain alerts", description: "Hourly" }));
+        expect(got[0]).toEqual({ checked: true, onChange, disabled: false, id: "rain", labelledBy: "rain-label", describedBy: "rain-description" });
+
+        const bare = render(h(ui.Switch, { id: "snow", checked: false, onChange, disabled: true, "aria-label": "Snow alerts" }));
+        expect(got[1]).toMatchObject({ disabled: true, labelledBy: "snow-label", describedBy: undefined });
+        expect(bare.root.findByProps({ id: "snow-label" }).props.className).toBe("mist-sr-only");
+        expect(text(bare)).toBe("Snow alerts");
+
+        const unnamed = render(h(ui.Switch, { checked: false, onChange }));
+        expect(got).toHaveLength(2);
+        expect(unnamed.root.findByType("button").props.role).toBe("switch");
+    } finally {
+        discordComponents = {};
+    }
+});
+
+test("TextInput is a styled input that reports its value, passes its props on and marks an invalid value", () => {
+    const values: string[] = [];
+    const keys: string[] = [];
+    const root = render(h(ui.TextInput, {
+        value: "Oslo", onChange: v => void values.push(v), placeholder: "City", name: "city", maxLength: 40,
+        className: "wide", "aria-label": "City", onKeyDown: e => void keys.push(e.key),
+    }));
+    const input = root.root.findByType("input");
+    expect(input.props).toMatchObject({ type: "text", value: "Oslo", placeholder: "City", name: "city", maxLength: 40, className: "mist-input wide", "aria-label": "City", "aria-invalid": undefined });
+    act(() => input.props.onChange({ currentTarget: { value: "Oslo!" } }));
+    act(() => input.props.onKeyDown({ key: "Enter" }));
+    expect(values).toEqual(["Oslo!"]);
+    expect(keys).toEqual(["Enter"]);
+
+    const other = render(h(ui.TextInput, { value: "", onChange() { }, type: "password", invalid: true, disabled: true, readOnly: true })).root.findByType("input");
+    expect(other.props).toMatchObject({ type: "password", className: "mist-input", "aria-invalid": true, disabled: true, readOnly: true });
+    // Without a label or description it's the input alone
+    expect(render(h(ui.TextInput, { value: "", onChange() { } })).toJSON()).toMatchObject({ type: "input" });
+});
+
+test("TextInput with a label and description is a field whose label points at the input and whose description describes it", () => {
+    const field = render(h(ui.TextInput, { id: "city", value: "Oslo", onChange() { }, label: "City", description: "Where the forecast is for", className: "wide" }));
+    const input = field.root.findByType("input");
+    expect(input.props).toMatchObject({ id: "city", className: "mist-input wide", "aria-describedby": "city-description" });
+    expect(field.root.findByType("label").props).toMatchObject({ htmlFor: "city", className: "mist-field-label" });
+    expect(field.root.findByProps({ id: "city-description" }).props.className).toBe("mist-field-description");
+    expect(field.toJSON()).toMatchObject({ type: "div", props: { className: "mist-field" } });
+    expect(text(field)).toBe("CityWhere the forecast is for");
+
+    // Without an id, the label still points at the generated one
+    const generated = render(h(ui.TextInput, { value: "", onChange() { }, label: "Country" })).root;
+    const id = generated.findByType("input").props.id;
+    expect(id).toBeString();
+    expect(generated.findByType("label").props.htmlFor).toBe(id);
+    expect(generated.findByType("input").props["aria-describedby"]).toBeUndefined();
+
+    // A description alone still describes the input
+    const described = render(h(ui.TextInput, { value: "", onChange() { }, "aria-label": "Zip", description: "Five digits" })).root;
+    const zip = described.findByType("input");
+    expect(described.findAllByType("label")).toHaveLength(0);
+    expect(described.findByProps({ id: zip.props["aria-describedby"] }).props.className).toBe("mist-field-description");
+});
+
+test("useValue works with mist.data objects and arrays without an infinite render loop", () => {
+    const { mist, run } = plugin("t-ui-data-use-value");
+    const tabs = mist.data<string[]>("tabs", ["a"]);
+    let renders = 0;
+    const Tabs = () => {
+        renders++;
+        return h("span", null, ui.useValue(tabs).join(","));
+    };
+    const root = render(h(Tabs));
+    expect(text(root)).toBe("a");
+    expect(renders).toBeLessThanOrEqual(2);
+    const before = renders;
+    act(() => tabs.set(["a", "b"]));
+    expect(text(root)).toBe("a,b");
+    expect(renders).toBe(before + 1);
+    act(() => { root.unmount(); run.dispose(); });
 });

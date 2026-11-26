@@ -95,8 +95,9 @@ test("a patch marked onDemand shows as waiting while its code isn't downloaded, 
 
 test("the CLI's patch listing reads the same onDemand mark as status", async () => {
     const { ON_DEMAND } = await import("../src/patches");
-    const cli = await Bun.file(join(import.meta.dir, "..", "bin", "mist.ts")).text();
-    expect(cli).toContain(ON_DEMAND);
+    const bin = join(import.meta.dir, "..", "bin");
+    const sources = await Promise.all([...new Bun.Glob("*.ts").scanSync(bin)].map(file => Bun.file(join(bin, file)).text()));
+    expect(sources.some(source => source.includes(ON_DEMAND))).toBe(true);
 });
 
 test("the shared keys are fixed protocol names, not the package name, so copies installed under any name meet", async () => {
@@ -157,7 +158,7 @@ test("a stand-in that says it runs keeps the id: the plugin warns, and the regis
     const run = fakeContext({ native: mistNative(false), id: "t-swap-squat" });
     definition.start!(run.ctx);
     expect(shared().get("t-swap-squat")).toBe(squatter);
-    expect(run.logs.map(p => p.args[0])).toContain("Another handle holds t-swap-squat in the debug registry and says it is running, so `mist` can't reach this run");
+    expect(run.logs.map(p => p.args[0])).toContain("Another running handle holds t-swap-squat in the debug registry: `mist` can't reach this run");
     expect(shared().concerns("t-swap-squat")).toEqual(["1 registration was refused while t-swap-squat's handle said it was running: two handles claim this id"]);
 });
 
@@ -174,6 +175,33 @@ test("a hot reload across copies at different versions replaces the handle once 
         expect(shared().history(id)).toEqual({ registered: 2, replaced: 1, refused: 0, reclaimed: 0 });
         expect(shared().concerns(id)).toEqual([]);
     }
+});
+
+test("a registry a later copy installed with members this copy doesn't know is used as it is", async () => {
+    const { registry } = await import("../src/registry");
+    const root: Record<symbol, unknown> = {};
+    const handles = new Map<string, unknown>();
+    const newer = {
+        version: 1,
+        register: (handle: { id: string; }) => (handles.set(handle.id, handle), () => void handles.delete(handle.id)),
+        get: (id: string) => handles.get(id),
+        list: () => [...handles.values()],
+        snapshot: () => "a member from a newer copy",
+    };
+    root[Symbol.for("mist-api.registry.v1")] = newer;
+    const installed = registry(root);
+    expect(installed).toBe(newer as never);
+    const handle = forged("t-registry-newer", false);
+    installed.register(handle);
+    expect(installed.get("t-registry-newer")).toBe(handle);
+});
+
+test("pluginOf says when the registry can't be read, instead of blaming the object", async () => {
+    const { pluginOf } = await import("../src/permissions");
+    const broken = forged("t-owns-throws", false);
+    broken.owns = () => { throw new Error("handle broke"); };
+    shared().register(broken);
+    expect(() => pluginOf({ id: "t-owns-throws" }, "discord()")).toThrow("discord(): mist's page registry threw checking t-owns-throws: handle broke");
 });
 
 test("page code can't replace window.Mist with a lying status", () => {

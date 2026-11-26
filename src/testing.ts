@@ -4,6 +4,9 @@
  */
 import type { Filter, FluxAction, FluxDispatcher, FoundExport, PluginContext, SettingsSchema, SettingsValues } from "@evi/api";
 
+import type { LogLevel } from "./protocol.ts";
+
+export type { LogLevel } from "./protocol.ts";
 export {
     type FakeBrowserWindow, type FakeBrowserWindowClass, type FakeCookie, type FakeCookieDetails, type FakeCookies, fakeElectron, type FakeElectron,
     type FakeElectronModule, type FakeElectronOptions, type FakeSession, type FakeWebContents, type PermissionCheckHandler, type PermissionRequestHandler, type Rect,
@@ -63,7 +66,8 @@ export interface FakeEviModule {
     findStore: EviApi["findStore"];
     getStore: EviApi["getStore"];
     waitFor: EviApi["waitFor"];
-    filters: Pick<EviApi["filters"], "byStoreName">;
+    /** byProps and byCode test the value as Evi's do; byStoreName takes the store added under that name */
+    filters: Pick<EviApi["filters"], "byStoreName" | "byProps" | "byCode">;
     /** The first added store or export the filter takes */
     find: EviApi["find"];
     /** Every added store and export the filter takes */
@@ -73,7 +77,7 @@ export interface FakeEviModule {
     Dispatcher: FakeDispatcher;
     /** The React passed to fakeEvi, for code that imports React from @evi/api */
     React: EviApi["React"];
-    /** Evi's Components, empty, so mist's Button and Tip render their own fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. */
+    /** Evi's Components, empty: mist's Button and Tip render their fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. */
     Components: Record<string, unknown>;
 }
 
@@ -89,6 +93,59 @@ export interface FakeEvi {
     ready: boolean;
     /** Each name findStore and getStore were asked for, oldest first */
     readonly lookups: string[];
+    /** Evi's plugin list, as `window.Evi.plugins` gives it */
+    readonly plugins: FakePlugins;
+    /** Adds the installed plugin `id`, or replaces it, and calls the plugin list's subscribers */
+    setPlugin(id: string, plugin?: FakePlugin): void;
+    removePlugin(id: string): void;
+    /**
+     * Sets `globalThis.Evi` to `{ plugins, settings }` for code that reads `window.Evi`. Returns a
+     * function that puts back what was there.
+     */
+    installGlobal(): () => void;
+}
+
+/** An installed plugin as Evi's plugin list reports it */
+export interface FakePlugin {
+    /** Default the id */
+    name?: string;
+    version?: string;
+    /** Default true */
+    running?: boolean;
+    /** Default true */
+    evaluated?: boolean;
+    error?: string;
+    enabledByDefault?: boolean;
+    /** The plugin's switch in Evi's settings. Default true */
+    enabled?: boolean;
+}
+
+export interface FakePluginInfo {
+    running: boolean;
+    evaluated: boolean;
+    error?: string;
+    manifest: { name: string; version?: string; enabledByDefault?: boolean; };
+}
+
+export interface FakePlugins {
+    get(id: string): FakePluginInfo | undefined;
+    subscribe(listener: () => void): () => void;
+    /** The listeners now subscribed */
+    readonly listeners: Set<() => void>;
+}
+
+function matchesCode(fn: Function, code: (string | RegExp)[]) {
+    let source: string;
+    try {
+        source = Function.prototype.toString.call(fn);
+    } catch {
+        return false;
+    }
+    return code.every(c => {
+        if (typeof c === "string") return source.includes(c);
+        c.lastIndex = 0;
+        return c.test(source);
+    });
 }
 
 export interface FakeEviOptions {
@@ -110,13 +167,56 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
     const lookups: string[] = [];
     const waiting = new Set<{ filter: Filter; callback: (value: any, found: FoundExport) => void; }>();
     const found = (name: string, value: object): FoundExport => ({ id: `fake:${name}`, exports: value, key: undefined, value });
+    const installed = new Map<string, FakePlugin>();
+    const pluginListeners = new Set<() => void>();
+    const pluginsChanged = () => { for (const listener of [...pluginListeners]) listener(); };
+    const plugins: FakePlugins = {
+        get(id) {
+            const plugin = installed.get(id);
+            if (!plugin) return undefined;
+            const { name = id, version, running = true, evaluated = true, error, enabledByDefault } = plugin;
+            return {
+                running,
+                evaluated,
+                ...error !== undefined && { error },
+                manifest: { name, ...version !== undefined && { version }, ...enabledByDefault !== undefined && { enabledByDefault } },
+            };
+        },
+        subscribe(listener) {
+            pluginListeners.add(listener);
+            return () => void pluginListeners.delete(listener);
+        },
+        listeners: pluginListeners,
+    };
+    const settings = {
+        get data() {
+            return { plugins: Object.fromEntries([...installed].map(([id, plugin]) => [id, { enabled: plugin.enabled ?? true }])) };
+        },
+    };
     const evi: FakeEvi = {
         ready: true,
         lookups,
+        plugins,
+        setPlugin(id, plugin = {}) {
+            installed.set(id, plugin);
+            pluginsChanged();
+        },
+        removePlugin(id) {
+            if (installed.delete(id)) pluginsChanged();
+        },
+        installGlobal() {
+            const root = globalThis as { Evi?: unknown; };
+            const had = Object.hasOwn(root, "Evi"), before = root.Evi;
+            root.Evi = { plugins, settings };
+            return () => {
+                if (had) root.Evi = before;
+                else delete root.Evi;
+            };
+        },
         addStore(name, store) {
             stores.set(name, store);
             for (const waiter of [...waiting]) {
-                if (!waiter.filter(store)) continue;
+                if (!takes(waiter.filter, store)) continue;
                 waiting.delete(waiter);
                 waiter.callback(store, found(name, store));
             }
@@ -136,9 +236,11 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
             },
             filters: {
                 byStoreName: name => Object.assign((value: unknown) => value !== undefined && stores.get(name) === value, { $label: `store ${name}` }),
+                byProps: (...props) => Object.assign((value: any) => value != null && props.every(p => value[p] !== undefined), { $label: `props ${props.join(", ")}` }),
+                byCode: (...code) => Object.assign((value: unknown) => typeof value === "function" && matchesCode(value, code), { $label: `code ${code.map(String).join(", ")}`, $code: code }),
             },
             waitFor: (filter, callback) => {
-                for (const [name, store] of stores) if (filter(store)) {
+                for (const [name, store] of stores) if (takes(filter, store)) {
                     callback(store as never, found(name, store));
                     return () => { };
                 }
@@ -150,26 +252,25 @@ export function fakeEvi(options: FakeEviOptions = {}): FakeEvi {
             findAll: (filter => searched().filter(value => takes(filter, value))) as EviApi["findAll"],
             I18n: { discordLocale: "en-US" },
             Dispatcher: fakeDispatcher(),
-            React: options.React!,
+            get React() {
+                if (!options.React) throw new Error("fakeEvi was made without React: pass fakeEvi({ React })");
+                return options.React;
+            },
             Components: {},
         },
     };
-    // Not enumerable, so `{ ...evi.module, x }` leaves it out instead of throwing
-    if (!options.React) Object.defineProperty(evi.module, "React", {
-        get() { throw new Error("fakeEvi was made without React: pass fakeEvi({ React })"); },
-        enumerable: false,
-    });
+    // Hidden when missing: `{ ...evi.module, x }` leaves it out instead of throwing
+    if (!options.React) Object.defineProperty(evi.module, "React", { enumerable: false });
     return evi;
 }
 
-export type LogLevel = "log" | "debug" | "info" | "warn" | "error";
 export type FakeNative = (method: string, ...args: unknown[]) => Promise<unknown>;
 
 export interface FakeContextOptions<S extends SettingsSchema> {
     id?: string;
     /** The plugin's settings schema, for the defaults of settings.get and settings.all */
     schema?: S;
-    /** Stored setting values. ctx.settings.set writes into this object, so passing it to the next fakeContext starts again with the same settings, as after a restart. */
+    /** Stored setting values. ctx.settings.set writes into this object: passing it to the next fakeContext starts again with the same settings, as after a restart. */
     settings?: Partial<SettingsValues<S>> & Record<string, unknown>;
     /** Answers ctx.native.call. Without it, ctx.native.call throws as Evi's does for a plugin without a native module. */
     native?: FakeNative;

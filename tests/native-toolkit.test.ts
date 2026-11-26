@@ -1,5 +1,8 @@
 import type { NativeContext } from "@evi/api/native";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { check, loginWindow, NativeError, openExternal, privateSession } from "../src/native";
 import { HttpError } from "../src/util";
@@ -8,6 +11,20 @@ import { electron } from "./electron";
 const ctx = { pluginId: "t-kit", pluginDir: "", dataDir: "", onBeforeRequest: () => () => { }, onDispose: () => { } } as NativeContext;
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+const dirs: string[] = [];
+afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
+
+/** A context over a fresh data folder, with the other installed plugins' folders under `plugins` */
+function dataContext(pluginId: string, others: string[] = []) {
+    const dataDir = mkdtempSync(join(tmpdir(), "mist-session-"));
+    dirs.push(dataDir);
+    for (const id of [pluginId, ...others]) mkdirSync(join(dataDir, "plugins", id), { recursive: true });
+    return { ...ctx, pluginId, pluginDir: join(dataDir, "plugins", pluginId), dataDir } as NativeContext;
+}
+
+/** What Discord's restart does to the fake: the sessions in memory are gone, the partitions on disk stay */
+const restart = (partition: string) => void electron.sessions.delete(partition);
 
 function refusal(fn: () => unknown) {
     try {
@@ -56,6 +73,8 @@ describe("check", () => {
     test("bool, oneOf and record refuse anything else", () => {
         expect(() => check.bool("true")).toThrow(NativeError);
         expect(refusal(() => check.oneOf("c", ["a", "b"], "mode")).message).toBe('mode must be one of "a", "b"');
+        expect(refusal(() => check.oneOf(3n, [1n, 2n], "id")).message).toBe("id must be one of 1n, 2n");
+        expect(refusal(() => check.oneOf("x", [Symbol("a")], "tag")).message).toBe("tag must be one of Symbol(a)");
         for (const bad of [null, [], "x"]) expect(() => check.record(bad)).toThrow(NativeError);
     });
 
@@ -81,8 +100,8 @@ describe("check", () => {
 describe("privateSession", () => {
     test("uses the plugin's own persistent partition and denies every permission", async () => {
         const login = privateSession(ctx, "weather");
-        expect(login.partition).toBe("persist:t-kit-weather");
-        const ses = electron.sessions.get("persist:t-kit-weather")!;
+        expect(login.partition).toBe("persist:mist:t-kit:weather");
+        const ses = electron.sessions.get("persist:mist:t-kit:weather")!;
         expect(login.session as unknown).toBe(ses);
         let granted: boolean | undefined;
         ses.permissionRequestHandler!({}, "media", answer => void (granted = answer));
@@ -91,10 +110,103 @@ describe("privateSession", () => {
         expect(ses.getUserAgent()).toContain("Electron/");
     });
 
+    test("two plugins whose id and name join the same way get their own partitions", () => {
+        const first = privateSession({ ...ctx, pluginId: "a" }, "b-c");
+        const second = privateSession({ ...ctx, pluginId: "a-b" }, "c");
+        expect([first.partition, second.partition]).toEqual(["persist:mist:a:b-c", "persist:mist:a-b:c"]);
+        expect(first.session).not.toBe(second.session);
+    });
+
+    test("cookies move once from the pre-0.5 partition into an empty new one, and leave the old one", async () => {
+        const legacy = electron.module.session.fromPartition("persist:t-kit-moved");
+        await legacy.cookies.set({ url: "https://example.com", domain: ".example.com", name: "sid", value: "abc", secure: true, httpOnly: true, expirationDate: 2_000_000_000 });
+        await legacy.cookies.set({ url: "https://api.example.com", name: "host", value: "1" });
+        const login = privateSession(ctx, "moved");
+        expect(await login.cookie("https://www.example.com", "sid")).toBe("abc");
+        expect(await login.cookie("https://api.example.com", "host")).toBe("1");
+        expect(await login.hasCookie("https://other.example.com", "host")).toBe(false);
+        const [sid] = await login.session.cookies.get({ name: "sid" });
+        expect(sid).toMatchObject({ domain: ".example.com", hostOnly: false, secure: true, httpOnly: true, expirationDate: 2_000_000_000 });
+        expect(await legacy.cookies.get()).toEqual([]);
+
+        // A new partition that already has cookies is left alone, even when the old one has some again
+        await legacy.cookies.set({ url: "https://example.com", name: "stale", value: "x" });
+        electron.sessions.delete("persist:mist:t-kit:moved");
+        const fresh = electron.module.session.fromPartition("persist:mist:t-kit:moved");
+        await fresh.cookies.set({ url: "https://example.com", name: "sid", value: "new" });
+        const again = privateSession(ctx, "moved");
+        expect(await again.cookie("https://example.com", "stale")).toBeUndefined();
+        expect(await again.cookie("https://example.com", "sid")).toBe("new");
+        expect((await legacy.cookies.get()).map(c => c.name)).toEqual(["stale"]);
+    });
+
+    test("a cookie that fails to move is skipped, and the rest still move", async () => {
+        const legacy = electron.module.session.fromPartition("persist:t-kit-skip");
+        for (const name of ["a", "bad", "c"]) await legacy.cookies.set({ url: "https://example.com", name, value: name });
+        const target = electron.module.session.fromPartition("persist:mist:t-kit:skip");
+        const set = target.cookies.set.bind(target.cookies);
+        target.cookies.set = async details => {
+            if (details.name === "bad") throw new Error("refused");
+            return set(details);
+        };
+        const login = privateSession(ctx, "skip");
+        expect(await login.cookie("https://example.com", "a")).toBe("a");
+        expect(await login.cookie("https://example.com", "bad")).toBeUndefined();
+        expect(await login.cookie("https://example.com", "c")).toBe("c");
+        // The one that didn't move stays where it was
+        expect((await legacy.cookies.get()).map(c => c.name)).toEqual(["bad"]);
+    });
+
+    test("the move runs once: clear() empties the pre-0.5 partition too, and its leftovers never come back", async () => {
+        const run = dataContext("t-once");
+        const legacy = electron.module.session.fromPartition("persist:t-once-site");
+        await legacy.cookies.set({ url: "https://example.com", name: "old", value: "1" });
+        // A session that already has cookies skips the move, which leaves the old partition's cookies there
+        await electron.module.session.fromPartition("persist:mist:t-once:site").cookies.set({ url: "https://example.com", name: "sid", value: "new" });
+        const login = privateSession(run, "site");
+        expect(await login.cookie("https://example.com", "old")).toBeUndefined();
+        expect(existsSync(join(run.dataDir, "plugin-data", "t-once", "mist-session-site.migrated"))).toBe(true);
+
+        await login.clear();
+        expect(await login.session.cookies.get({})).toEqual([]);
+        expect(await legacy.cookies.get()).toEqual([]);
+
+        // Even with cookies in the old partition again, a signed-out session stays signed out after a restart
+        await legacy.cookies.set({ url: "https://example.com", name: "old", value: "2" });
+        restart("persist:mist:t-once:site");
+        const again = privateSession(run, "site");
+        expect(await again.hasCookie("https://example.com", "old")).toBe(false);
+        expect((await legacy.cookies.get()).map(c => c.name)).toEqual(["old"]);
+    });
+
+    test("a pre-0.5 partition another installed plugin could have made is left alone, also by clear()", async () => {
+        // `t-col` with `a-login` and `t-col-a` with `login` both made persist:t-col-a-login before 0.5
+        const run = dataContext("t-col", ["t-col-a", "t-colx"]);
+        const legacy = electron.module.session.fromPartition("persist:t-col-a-login");
+        await legacy.cookies.set({ url: "https://example.com", name: "sid", value: "theirs" });
+        const login = privateSession(run, "a-login");
+        expect(await login.hasCookie("https://example.com", "sid")).toBe(false);
+        await login.clear();
+        expect((await legacy.cookies.get()).map(c => c.value)).toEqual(["theirs"]);
+
+        // `t-colx` can't make persist:t-col-b-login: the move goes ahead
+        const other = electron.module.session.fromPartition("persist:t-col-b-login");
+        await other.cookies.set({ url: "https://example.com", name: "sid", value: "mine" });
+        expect(await privateSession(run, "b-login").cookie("https://example.com", "sid")).toBe("mine");
+    });
+
+    test("a cookie move that fails still gives a working session", async () => {
+        electron.module.session.fromPartition("persist:t-kit-locked").cookies.get = async () => { throw new Error("locked"); };
+        const login = privateSession(ctx, "locked");
+        expect(await login.hasCookie("https://example.com", "sid")).toBe(false);
+        await login.session.cookies.set({ url: "https://example.com", name: "sid", value: "1" });
+        expect(await login.cookie("https://example.com", "sid")).toBe("1");
+    });
+
     test("browserUserAgent strips the Electron and discord tokens, also when asked twice", () => {
         privateSession(ctx, "music", { browserUserAgent: true });
         privateSession(ctx, "music", { browserUserAgent: true });
-        const agent = electron.sessions.get("persist:t-kit-music")!.getUserAgent();
+        const agent = electron.sessions.get("persist:mist:t-kit:music")!.getUserAgent();
         expect(agent).not.toMatch(/Electron|discord/i);
         expect(agent).toContain("Chrome/");
     });
@@ -110,7 +222,7 @@ describe("privateSession", () => {
         const err = await login.json("https://api.example.com/down").catch((e: HttpError) => e) as HttpError;
         expect(err).toBeInstanceOf(HttpError);
         expect(err.status).toBe(503);
-        const ses = electron.sessions.get("persist:t-kit-api")!;
+        const ses = electron.sessions.get("persist:mist:t-kit:api")!;
         expect(ses.fetched[0].init?.signal).toBeInstanceOf(AbortSignal);
         expect((await login.fetch("https://api.example.com/ok")).status).toBe(200);
         expect(ses.fetched).toHaveLength(3);
@@ -138,7 +250,7 @@ describe("privateSession", () => {
         await login.clear();
         expect(await login.hasCookie("https://example.com", "sid")).toBe(false);
         await login.flush();
-        expect(electron.sessions.get("persist:t-kit-site")!.cookies.flushes).toBe(1);
+        expect(electron.sessions.get("persist:mist:t-kit:site")!.cookies.flushes).toBe(1);
     });
 });
 
@@ -151,6 +263,7 @@ describe("loginWindow", () => {
         const seen: string[] = [];
         const result = loginWindow(login, { url: "https://example.com/login", title: "Sign in", done: url => (seen.push(url), loggedIn), pollMs: 60_000 });
         const win = electron.windows.at(-1)!;
+        await flush();
         expect(win).not.toBe(main);
         expect(win.options).toMatchObject({
             width: 480, height: 720, title: "Sign in", parent: main, x: 460, y: 190, show: false,
@@ -167,7 +280,7 @@ describe("loginWindow", () => {
         expect(await result).toBe(true);
         expect(seen.at(-1)).toBe("https://example.com/home");
         expect(win.isDestroyed()).toBe(true);
-        expect(electron.sessions.get("persist:t-kit-site")!.cookies.flushes).toBe(1);
+        expect(electron.sessions.get("persist:mist:t-kit:site")!.cookies.flushes).toBe(1);
         delete (globalThis as { mainWindowId?: number; }).mainWindowId;
     });
 
@@ -191,7 +304,7 @@ describe("loginWindow", () => {
         controller.abort();
         expect(await aborted).toBe(false);
         expect(win.isDestroyed()).toBe(true);
-        expect(electron.sessions.get("persist:t-kit-closing")!.cookies.flushes).toBe(2);
+        expect(electron.sessions.get("persist:mist:t-kit:closing")!.cookies.flushes).toBe(2);
         expect(await loginWindow(login, { url: "https://example.com", done: () => true, signal: AbortSignal.abort() })).toBe(false);
     });
 
@@ -216,8 +329,13 @@ describe("loginWindow", () => {
     test("only https pages: the start URL must be one, and navigations elsewhere are stopped", async () => {
         const login = privateSession(ctx, "https");
         expect(() => loginWindow(login, { url: "http://example.com", done: () => false })).toThrow(TypeError);
+        for (const pollMs of [0, -1, Infinity, 2 ** 31]) expect(() => loginWindow(login, { url: "https://example.com", done: () => false, pollMs })).toThrow(RangeError);
+        expect(() => loginWindow(login, { url: "https://example.com", done: () => false, pollMs: NaN })).toThrow(TypeError);
+        for (const width of [0, -10, 1.5]) expect(() => loginWindow(login, { url: "https://example.com", done: () => false, width })).toThrow(RangeError);
+        expect(() => loginWindow(login, { url: "https://example.com", done: () => false, height: NaN })).toThrow(TypeError);
         const result = loginWindow(login, { url: "https://example.com", done: () => false });
         const win = electron.windows.at(-1)!;
+        await flush();
         expect(win.navigate("http://example.com/plain")).toBe(false);
         expect(win.navigate("file:///etc/passwd")).toBe(false);
         expect(win.webContents.getURL()).toBe("https://example.com");
@@ -246,6 +364,10 @@ describe("fakeElectron", () => {
         const { BrowserWindow } = electron.module;
         const win = new BrowserWindow({ width: 300, title: "T" });
         expect(BrowserWindow.fromId(win.id)).toBe(win);
+        expect(win).toBeInstanceOf(BrowserWindow);
+        const added = electron.addWindow();
+        expect(added).toBeInstanceOf(BrowserWindow);
+        added.destroy();
         expect(BrowserWindow.getFocusedWindow()).toBeNull();
         win.focus();
         expect(BrowserWindow.getFocusedWindow()).toBe(win);

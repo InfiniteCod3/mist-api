@@ -2,7 +2,6 @@ import { I18n } from "@evi/api";
 
 import { messageLink } from "./links.ts";
 
-/** Discord's language tag, as in "en-US" or "pt-BR": the one picked in Discord's Language settings */
 const locale = () => I18n.discordLocale;
 
 type Kept = Intl.DateTimeFormat | Intl.RelativeTimeFormat | Intl.NumberFormat | Intl.ListFormat | DurationFormat;
@@ -38,6 +37,7 @@ const DURATION_UNITS: readonly [DurationUnit, number][] = [["days", 86_400_000],
 
 /** The duration split into the units to show, the smaller ones dropped */
 export function durationParts(ms: number, units = 2): Partial<Record<DurationUnit, number>> {
+    const shown = Number.isFinite(units) ? Math.max(1, Math.floor(units)) : 2;
     let rest = Number.isFinite(ms) ? Math.max(0, ms) : 0;
     const counts = DURATION_UNITS.map(([unit, size]) => {
         const count = Math.floor(rest / size);
@@ -46,17 +46,21 @@ export function durationParts(ms: number, units = 2): Partial<Record<DurationUni
     });
     const first = counts.findIndex(([, count]) => count > 0);
     if (first < 0) return { seconds: 0 };
-    return Object.fromEntries(counts.slice(first, first + Math.max(1, Math.floor(units))).filter(([, count]) => count > 0));
+    return Object.fromEntries(counts.slice(first, first + shown).filter(([, count]) => count > 0));
 }
 
 const RELATIVE_UNITS: readonly [Intl.RelativeTimeFormatUnit, number][] = [
     ["year", 31_536_000], ["month", 2_592_000], ["week", 604_800], ["day", 86_400], ["hour", 3600], ["minute", 60],
 ];
 
-const time = (value: number | Date | string) => value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : value;
+function time(value: number | Date | string): number {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === "string") return Date.parse(value);
+    return value;
+}
 
 export const format = {
-    /** Discord's language tag, which every format here uses */
+    /** The language picked in Discord's settings, as in "en-US" or "pt-BR", which every format here uses */
     locale,
 
     /** A timer's reading: "4:05", "1:02:03". Below 0 counts as 0. */
@@ -75,7 +79,7 @@ export const format = {
             const singular = plural.slice(0, -1);
             return keep("unit", { singular, style }, tag => new Intl.NumberFormat(tag, { style: "unit", unit: singular, unitDisplay: style })).format(count);
         };
-        // DurationFormat leaves out a 0, so it would write nothing for "0 seconds"
+        // DurationFormat leaves out a 0 and would write nothing for "0 seconds"
         if (parts.every(([, count]) => count === 0)) return unit(["seconds", 0]);
         const Duration = (Intl as { DurationFormat?: DurationFormatConstructor; }).DurationFormat;
         if (Duration) return keep("duration", { style }, tag => new Duration(tag, { style })).format(Object.fromEntries(parts));

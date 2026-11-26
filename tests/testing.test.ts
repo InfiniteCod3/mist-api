@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as React from "react";
 import { act, create } from "react-test-renderer";
 
+import { eviOf } from "../src/registry";
 import { fakeContext, fakeDispatcher, fakeEvi, fakeStore } from "../src/testing";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean; }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -11,7 +12,8 @@ import { fakeContext, fakeDispatcher, fakeEvi, fakeStore } from "../src/testing"
 test("the testing module loads no runner and nothing from @evi/api at runtime", () => {
     const source = readFileSync(join(import.meta.dir, "..", "src", "testing.ts"), "utf8");
     const imports = [...source.matchAll(/^import\s+(type\s+)?.*?from\s+"([^"]+)"/gm)].map(m => [m[1]?.trim() ?? "", m[2]]);
-    expect(imports).toEqual([["type", "@evi/api"]]);
+    expect(imports.filter(([type]) => !type)).toEqual([]);
+    expect(imports.map(([, from]) => from)).toContain("@evi/api");
 });
 
 test("fakeStore notifies its listeners on change, after assigning", () => {
@@ -69,6 +71,18 @@ test("fakeEvi's waitFor calls back at once for a store that exists, later for on
     evi.addStore("LateStore", late);
     evi.addStore("NeverStore", fakeStore({}));
     expect(found).toEqual([early, late, "fake:LateStore"]);
+});
+
+test("fakeEvi's waitFor and addStore treat a filter that throws on a store as not taking it, as find does", () => {
+    const evi = fakeEvi();
+    evi.addStore("PlainStore", fakeStore({}));
+    const found: unknown[] = [];
+    const deep = (store: any) => store.config.ready === true;
+    evi.module.waitFor(deep, store => found.push(store));
+    evi.addStore("OtherStore", fakeStore({ name: "other" }));
+    const wanted = fakeStore({ config: { ready: true } });
+    evi.addStore("WantedStore", wanted);
+    expect(found).toEqual([wanted]);
 });
 
 test("fakeContext disposes newest first, logs a throwing disposer, and runs one added after stop at once", () => {
@@ -187,4 +201,45 @@ test("fakeEvi has every export mist-api imports from @evi/api, and find and find
     expect(evi.module.find(isButton)).toBe(button);
     expect(evi.module.findAll((v: any) => typeof v.kind === "string")).toEqual([{ kind: "store" }, button]);
     expect(evi.module.I18n.discordLocale).toBe("en-US");
+});
+
+test("fakeEvi's byProps and byCode take what Evi's do, and find searches with them", () => {
+    const evi = fakeEvi();
+    const { byProps, byCode } = evi.module.filters;
+    function sendMessage(channel: string) { return `POST /channels/${channel}/messages`; }
+    const actions = { sendMessage, editMessage: () => { } };
+    evi.addExport(sendMessage);
+    evi.addExport(actions);
+    evi.addExport(null);
+    expect(evi.module.find(byProps("sendMessage", "editMessage"))).toBe(actions);
+    expect(evi.module.find(byProps("sendMessage", "deleteMessage"))).toBeUndefined();
+    expect(evi.module.find(byCode("/messages", /channels\/\$\{/))).toBe(sendMessage);
+    expect(evi.module.find(byCode("/messages", "nowhere"))).toBeUndefined();
+    expect(byProps("a", "b").$label).toBe("props a, b");
+});
+
+test("fakeEvi's plugin list answers get and subscribe as window.Evi.plugins does, and installGlobal puts it there and back", () => {
+    const evi = fakeEvi();
+    let heard = 0;
+    const unsubscribe = evi.plugins.subscribe(() => void heard++);
+    evi.setPlugin("weather", { name: "Weather", version: "1.2.0" });
+    evi.setPlugin("broken", { running: false, error: "start threw", enabled: false });
+    expect(heard).toBe(2);
+    expect(evi.plugins.get("weather")).toEqual({ running: true, evaluated: true, manifest: { name: "Weather", version: "1.2.0" } });
+    expect(evi.plugins.get("broken")).toEqual({ running: false, evaluated: true, error: "start threw", manifest: { name: "broken" } });
+    expect(evi.plugins.get("missing")).toBeUndefined();
+
+    const root = globalThis as { Evi?: any; };
+    const restore = evi.installGlobal();
+    expect(eviOf()?.plugins?.get("weather")?.manifest?.name).toBe("Weather");
+    expect(root.Evi.settings.data.plugins).toEqual({ weather: { enabled: true }, broken: { enabled: false } });
+    evi.removePlugin("broken");
+    expect(heard).toBe(3);
+    expect(root.Evi.plugins.get("broken")).toBeUndefined();
+    restore();
+    expect("Evi" in globalThis).toBe(false);
+
+    unsubscribe();
+    evi.setPlugin("later");
+    expect(heard).toBe(3);
 });

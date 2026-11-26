@@ -1,6 +1,6 @@
 /**
  * Checks the `$self` names in a definition's source patches against the definition. Evi rewrites
- * `$self` to the plugin's definition, so a misspelt name is undefined inside Discord's code, and a
+ * `$self` to the plugin's definition: a misspelt name is undefined inside Discord's code, and a
  * call of it is a TypeError there, far from the patch.
  */
 
@@ -20,7 +20,7 @@ export function checkSelf(definition: Record<string, unknown>): string[] {
             for (const [, name, call] of text.matchAll(SELF)) {
                 const has = Object.hasOwn(definition, name);
                 if (has && (!call || typeof definition[name] === "function")) continue;
-                const what = call ? `calls $self.${name}, but the definition has no function ${name}, so Discord's code gets undefined there` : `reads $self.${name}, but the definition has no ${name}, so Discord's code gets undefined there`;
+                const what = call ? `calls $self.${name}, but the definition has no function ${name}: Discord's code gets undefined there` : `reads $self.${name}, but the definition has no ${name}: Discord's code gets undefined there`;
                 const near = nearest(name, Object.keys(definition).filter(key => typeof definition[key] === "function"));
                 lines.add(`patches[${index}] ${what}${near ? `. Did you mean ${near}?` : ""}`);
             }

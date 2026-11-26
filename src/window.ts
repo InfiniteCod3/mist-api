@@ -1,6 +1,4 @@
 /** Finding Discord's main window from native code. */
-// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
-// import of a part the mock lacks would fail to link before any of mist runs
 import * as electron from "electron";
 import type { BrowserWindow } from "electron";
 

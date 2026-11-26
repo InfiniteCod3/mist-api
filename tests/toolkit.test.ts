@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { killWithEscalation } from "../src/lifetime";
-import { dataFolder, discordWindow, jsonFile, lifetime, NativeError, pathGrants, run, secrets, which } from "../src/native";
+import { dataFolder, discordWindow, jsonFile, lifetime, NativeError, pathGrants, run, secrets, which, writeAtomic, writeAtomicSync } from "../src/native";
 import { electron } from "./electron";
 
 const dirs: string[] = [];
@@ -200,9 +200,14 @@ test("jsonFile keeps a file it can't parse as .bad and starts from initial, and 
 
     const small = jsonFile(ctx, "small", { initial: "", maxBytes: 10 });
     expect(() => small.set("a".repeat(20))).toThrow(RangeError);
+    expect(() => small.set(undefined as never)).toThrow(new TypeError("jsonFile: small.json can't be stored as JSON (got undefined)"));
+    expect(() => small.set(1n as never)).toThrow(/jsonFile: small\.json can't be stored as JSON/);
     expect(small.get()).toBe("");
-    for (const name of ["../escape", "a/b", "", "mist-secrets", ".hidden"]) expect(() => jsonFile(ctx, name, { initial: 0 })).toThrow(/Bad file name/);
-    expect(() => dataFolder({ ...ctx, pluginId: "../other" })).toThrow();
+    for (const name of ["../escape", "a/b", "", "mist-secrets", ".hidden"]) {
+        expect(() => jsonFile(ctx, name, { initial: 0 })).toThrow(TypeError);
+        expect(() => jsonFile(ctx, name, { initial: 0 })).toThrow(/bad file name/);
+    }
+    expect(() => dataFolder({ ...ctx, pluginId: "../other" })).toThrow(TypeError);
 });
 
 test("jsonFile leaves a file it can't read alone, and get and set throw until it can be read, so no write replaces it", () => {
@@ -283,7 +288,7 @@ test("secrets are stored encrypted in the plugin's folder and read back; they re
     expect(again.get("constructor")).toBeUndefined();
     again.set("__proto__", "x");
     expect(again.get("__proto__")).toBe("x");
-    expect(() => again.set("../x", "x")).toThrow(/Bad secret name/);
+    expect(() => again.set("../x", "x")).toThrow(/bad secret name/);
 
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "linux" });
@@ -342,4 +347,135 @@ test("path grants hand out opaque handles for what the person picked, resolve on
     expect(() => later.resolveGrant(file)).toThrow(expect.objectContaining({ code: "unknown-grant" }));
     restarted.dispose();
     electron.reset();
+});
+
+/** What `log` printed to console.error while `fn` ran */
+async function loggedErrors(fn: () => Promise<void>) {
+    const printed: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void printed.push(args.map(String).join(" "));
+    try {
+        await fn();
+    } finally {
+        console.error = original;
+    }
+    return printed;
+}
+
+test("a lifetime timer that throws is logged and doesn't stop the others", async () => {
+    const { ctx, dispose } = nativeContext();
+    const life = lifetime(ctx);
+    let ticks = 0;
+    const printed = await loggedErrors(async () => {
+        life.interval(() => { throw new Error("tick broke"); }, 5);
+        life.timeout(() => { throw new Error("timeout broke"); }, 1);
+        life.interval(() => ticks++, 5);
+        await waitFor(() => ticks >= 3);
+        dispose();
+    });
+    expect(printed.some(line => line.includes("A lifetime interval threw:") && line.includes("tick broke"))).toBe(true);
+    expect(printed.some(line => line.includes("A lifetime timeout threw:") && line.includes("timeout broke"))).toBe(true);
+});
+
+test("run settles on timeout or abort even while a grandchild keeps the output pipes open", async () => {
+    // The grandchild inherits the pipes and outlives both its parent and the test's deadline
+    const spawnsGrandchild = (parent: string) => ["-e", `require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 6000)"], { stdio: "inherit" }); ${parent}`];
+    const started = Date.now();
+    expect(await rejection(run(process.execPath, spawnsGrandchild("setInterval(() => {}, 1000)"), { timeout: 300 }))).toMatchObject({ code: "timeout" });
+
+    const controller = new AbortController();
+    const exitsFirst = run(process.execPath, spawnsGrandchild(""));
+    setTimeout(() => controller.abort(), 800);
+    const aborted = run(process.execPath, spawnsGrandchild(""), { signal: controller.signal });
+    expect(await rejection(aborted)).toMatchObject({ name: "AbortError" });
+    expect(Date.now() - started).toBeLessThan(4000);
+    // Without a failure, run waits for the pipes to close, so the output is complete
+    expect(await exitsFirst).toMatchObject({ code: 0 });
+}, 15_000);
+
+test("a .cmd or .bat on Windows needs a shell, and run and lifetime.spawn say so instead of failing with EINVAL", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const { ctx, dispose } = nativeContext();
+    const life = lifetime(ctx);
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+        for (const file of ["C:\\tools\\build.cmd", "C:\\tools\\OLD.BAT"]) {
+            expect(await rejection(run(file))).toMatchObject({ name: "NativeError", code: "needs-shell", data: { file } });
+            expect(() => life.spawn(file)).toThrow(expect.objectContaining({ code: "needs-shell" }));
+        }
+    } finally {
+        Object.defineProperty(process, "platform", platform);
+        dispose();
+    }
+});
+
+test.skipIf(process.platform !== "win32")("which reads PATH and PATHEXT whatever their case, as Windows does", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-pathext-"));
+    dirs.push(dir);
+    const file = join(dir, "mist-case.cmd");
+    writeFileSync(file, "@echo off");
+    expect(await which("mist-case", { Path: dir, PathExt: ".EXE;.CMD" })).toBe(file);
+    expect(await which("mist-case", { Path: dir, pathext: ".EXE" })).toBeNull();
+});
+
+test("jsonFile that can't move an unparseable file aside leaves it alone and refuses to replace it", () => {
+    const { ctx, dataDir, dispose } = nativeContext("t-stuck");
+    const folder = dataFolder(ctx);
+    writeFileSync(join(folder, "notes.json"), "{ half written");
+    // A folder in the way of notes.json.bad makes the rename fail, as a lock or missing permission does
+    mkdirSync(join(folder, "notes.json.bad", "inside"), { recursive: true });
+    const notes = jsonFile(ctx, "notes", { initial: { list: [] as string[] }, debounceMs: 0 });
+    expect(() => notes.get()).toThrow(expect.objectContaining({ code: "file-unreadable" }));
+    expect(() => notes.set({ list: ["new"] })).toThrow(NativeError);
+    dispose();
+    expect(readFileSync(join(folder, "notes.json"), "utf8")).toBe("{ half written");
+
+    rmSync(join(folder, "notes.json.bad"), { recursive: true });
+    const later = jsonFile(nativeContext("t-stuck", dataDir).ctx, "notes", { initial: { list: [] as string[] } });
+    expect(later.get()).toEqual({ list: [] });
+    expect(readFileSync(join(folder, "notes.json.bad"), "utf8")).toBe("{ half written");
+});
+
+test("writeAtomicSync is exported for a plugin's files, and replaces the file whole", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-atomic-"));
+    dirs.push(dir);
+    const path = join(dir, "state.json");
+    writeAtomicSync(path, "{\"v\":1}");
+    writeAtomicSync(path, "{\"v\":2}");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ v: 2 });
+    expect(readdirSync(dir)).toEqual(["state.json"]);
+});
+
+test("writeAtomic and writeAtomicSync take bytes as well as text, and a failed write leaves no temporary file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mist-atomic-"));
+    dirs.push(dir);
+    const path = join(dir, "blob.bin");
+    await writeAtomic(path, "first");
+    expect(readFileSync(path, "utf8")).toBe("first");
+    await writeAtomic(path, Uint8Array.of(1, 2, 3));
+    expect([...readFileSync(path)]).toEqual([1, 2, 3]);
+    writeAtomicSync(path, Uint8Array.of(4, 5));
+    expect([...readFileSync(path)]).toEqual([4, 5]);
+
+    // Renaming over a folder fails: the temporary file is removed and the error comes through
+    const folder = join(dir, "folder");
+    mkdirSync(folder);
+    writeFileSync(join(folder, "keep"), "");
+    expect(await writeAtomic(folder, "x").then(() => null, err => err)).toBeInstanceOf(Error);
+    expect(() => writeAtomicSync(folder, "x")).toThrow();
+    expect(readdirSync(dir).sort()).toEqual(["blob.bin", "folder"]);
+});
+
+test("a timing option that isn't a number is a TypeError, and one out of range, past 2^31 - 1 ms included, a RangeError", async () => {
+    const { ctx } = nativeContext("t-numbers");
+    const scope = lifetime(ctx);
+    for (const bad of [NaN, "5", undefined]) expect(() => scope.timeout(() => { }, bad as number)).toThrow(TypeError);
+    for (const bad of [-1, Infinity, 2 ** 31]) expect(() => scope.interval(() => { }, bad)).toThrow(RangeError);
+    expect(() => scope.timeout(() => { }, 2 ** 31)).toThrow("lifetime.timeout: ms must be a finite number from 0 to 2147483647, got 2147483648");
+    scope.timeout(() => { }, 2 ** 31 - 1)();
+
+    expect(() => jsonFile(ctx, "n", { initial: 0, debounceMs: "1" as unknown as number })).toThrow(TypeError);
+    expect(() => jsonFile(ctx, "n", { initial: 0, debounceMs: 2 ** 31 })).toThrow(RangeError);
+    expect(() => jsonFile(ctx, "n", { initial: 0, maxBytes: 1.5 })).toThrow("jsonFile: maxBytes must be a whole number from 1, got 1.5");
+    expect(await rejection(run("node", [], { timeout: 2 ** 31 }))).toBeInstanceOf(RangeError);
 });

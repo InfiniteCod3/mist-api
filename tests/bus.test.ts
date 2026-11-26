@@ -46,7 +46,32 @@ test("a slot is shared across copies, and a stale release doesn't clear a newer 
     expect(seen).toEqual(["first", "second", undefined]);
 });
 
+test("a listener that throws is logged by name and channel, without the value, and the others still get it", () => {
+    const printed: unknown[][] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => void printed.push(args);
+    try {
+        const got: string[] = [];
+        const feed = channel<{ secret: string; }>("t-throwing", 1);
+        feed.subscribe(function brokenListener() { throw new Error("listener bug"); });
+        feed.subscribe(value => got.push(value.secret));
+        feed.publish({ secret: "hunter2" });
+        expect(got).toEqual(["hunter2"]);
+        expect(printed).toHaveLength(1);
+        expect(printed[0][0]).toBe("channel t-throwing@1: a listener (brokenListener) threw");
+        expect(JSON.stringify(printed[0].map(String))).not.toContain("hunter2");
+    } finally {
+        console.error = error;
+    }
+});
+
 test("refuses names and versions that can't key a channel", () => {
     expect(() => channel("", 1)).toThrow();
     expect(() => channel("x", 0)).toThrow();
+});
+
+test("a bad name of any type is shown in a clean TypeError, a BigInt included, which JSON.stringify can't show", () => {
+    expect(() => channel(10n as never, 1)).toThrow(new TypeError("channel: name must be a non-empty string, got 10n"));
+    expect(() => slot(Symbol("x") as never, 1)).toThrow(new TypeError("slot: name must be a non-empty string, got Symbol(x)"));
+    expect(() => channel({} as never, 1)).toThrow(new TypeError("channel: name must be a non-empty string, got an object"));
 });

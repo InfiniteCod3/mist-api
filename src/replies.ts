@@ -1,9 +1,12 @@
 /** The page side of native requests: `mist.requests.handle`, answering what nativeRequests asks. */
 import type { PluginContext } from "@evi/api";
 
-import { errorMessage, type EventsAnswer, HIDDEN, type ReplyOutcome, type RequestEvent } from "./protocol.ts";
+import { errorMessage, onEnd } from "./internal.ts";
+import { type EventsAnswer, HIDDEN, type ReplyOutcome, type RequestEvent } from "./protocol.ts";
 import { subscribe } from "./subscribe.ts";
 import { isRecord } from "./util.ts";
+import { backoff } from "./util/backoff.ts";
+import { sleep } from "./util/sleep.ts";
 
 type RequestFn = (payload: any) => unknown;
 
@@ -25,10 +28,13 @@ export interface MistRequests<R> {
 
 export interface RepliesSource {
     context(): PluginContext<any>;
-    protocol(context: PluginContext<any>): Promise<number>;
+    /** The native side's call protocol: 0 when it has none, undefined when asking failed for now */
+    protocol(context: PluginContext<any>): Promise<number | undefined>;
     /** Null when the native side was made without `requests` */
     poll(context: PluginContext<any>, boot: string | null, cursor: number): Promise<EventsAnswer<RequestEvent> | null>;
-    report(line: string, err: unknown): void;
+    report(line: string, err?: unknown): void;
+    /** The first wait before asking for the protocol again after a failed ask. Default 1000 */
+    retryMs?: number;
 }
 
 const isRequest = (value: unknown): value is RequestEvent =>
@@ -57,17 +63,35 @@ export function createRequests<R>(source: RepliesSource): MistRequests<R> {
         }
     }
 
-    async function listen(context: PluginContext<any>, handlers: Map<string, RequestFn>) {
-        if (await source.protocol(context) < 1) {
-            source.report("mist.requests: the native side doesn't make requests; it needs defineNative from @aurologic/mist-api 0.3 or later", new Error("no __mist_protocol"));
-            return;
+    /** Whether the native side speaks the call protocol, asking again with backoff until it says or the run ends */
+    async function speaksProtocol(context: PluginContext<any>): Promise<boolean> {
+        const ended = new AbortController();
+        const forget = onEnd(context, () => ended.abort());
+        const retry = backoff({ baseMs: source.retryMs ?? 1000 });
+        try {
+            for (; ;) {
+                const version = await source.protocol(context);
+                if (version !== undefined) {
+                    if (version < 1) source.report("mist.requests: the native side has no __mist_protocol and can't make requests; it needs defineNative from @aurologic/mist-api 0.3 or later.");
+                    return version >= 1;
+                }
+                await sleep(retry.next(), ended.signal);
+            }
+        } catch {
+            return false;
+        } finally {
+            forget();
         }
+    }
+
+    async function listen(context: PluginContext<any>, handlers: Map<string, RequestFn>) {
+        if (!await speaksProtocol(context)) return;
         const off = subscribe<RequestEvent>({
-            onDispose: fn => context.onDispose(fn),
+            onDispose: fn => onEnd(context, fn),
             async poll(boot, cursor) {
                 const answer = await source.poll(context, boot, cursor);
                 if (answer) return answer;
-                source.report("mist.requests: the native side makes no requests; pass { requests } from nativeRequests to defineNative", new Error("no requests"));
+                source.report("mist.requests: the native side makes no requests; pass { requests } from nativeRequests to defineNative.");
                 off();
                 return { boot: "", cursor: 0, fresh: false, events: [] };
             },

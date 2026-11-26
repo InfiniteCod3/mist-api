@@ -6,8 +6,15 @@ import type { ChangeSource } from "../src/stores";
 import { fakeEvi, fakeStore } from "../src/testing";
 
 const evi = fakeEvi({ React });
-mock.module("@evi/api", () => evi.module);
-const { currentUserId, isStreamerMode, stores, subscribe, useStore } = await import("../src/stores");
+/** findStore and find as the module under test calls them: a test can swap in Evi's guard, or a webpack that isn't loaded */
+let findStoreOnPage = evi.module.findStore;
+let findOnPage = evi.module.find;
+mock.module("@evi/api", () => ({
+    ...evi.module,
+    findStore: ((name: string) => findStoreOnPage(name)) as typeof findStoreOnPage,
+    find: ((filter: never) => findOnPage(filter)) as typeof findOnPage,
+}));
+const { currentUserId, isStreamerMode, lookup, store, stores, subscribe, useStore, whenStore } = await import("../src/stores");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean; }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -130,6 +137,135 @@ test("streamerMode is Discord's StreamerModeStore, and isStreamerMode reads each
     evi.ready = true;
 });
 
+test("the message, read state, voice, member, relationship and permission stores are looked up by Discord's names", () => {
+    const names = ["MessageStore", "ReadStateStore", "VoiceStateStore", "GuildMemberStore", "RelationshipStore", "PermissionStore"];
+    const made = names.map(name => ({ name }));
+    names.forEach((name, i) => evi.addStore(name, made[i]));
+    evi.lookups.length = 0;
+    const read = [stores.messages, stores.readStates, stores.voiceStates, stores.guildMembers, stores.relationships, stores.permissions];
+    expect(read).toEqual(made as never);
+    expect(evi.lookups).toEqual(names);
+    for (const name of names) evi.removeStore(name);
+    expect(stores.messages).toBeUndefined();
+});
+
+test("store reads any store by name, undefined while it's missing or webpack isn't ready", () => {
+    const mine = { here: true };
+    evi.addStore("TAnyStore", mine);
+    expect(store<typeof mine>("TAnyStore")).toBe(mine);
+    expect(store("TMissingStore")).toBeUndefined();
+    evi.ready = false;
+    expect(store("TAnyStore")).toBeUndefined();
+    evi.ready = true;
+});
+
+/** findStore as Evi's guard makes it for a plugin that declares permissions without readMessages */
+function guardingMessages(body: () => unknown) {
+    findStoreOnPage = (name => {
+        if (/Message/.test(name)) throw Object.assign(new Error(`t can't read messages (${name})`), { name: "PluginPermissionError" });
+        return evi.module.findStore(name);
+    }) as typeof findStoreOnPage;
+    try {
+        return body();
+    } finally {
+        findStoreOnPage = evi.module.findStore;
+    }
+}
+
+test("a store the plugin's manifest doesn't permit throws Evi's PluginPermissionError instead of looking missing", async () => {
+    evi.addStore("MessageStore", { getMessages: () => undefined });
+    guardingMessages(() => {
+        expect(() => store("MessageStore")).toThrow(expect.objectContaining({ name: "PluginPermissionError" }));
+        expect(() => stores.messages).toThrow(expect.objectContaining({ name: "PluginPermissionError" }));
+        expect(stores.user).toBeDefined();
+    });
+    await guardingMessages(() => expect(whenStore("MessageStore")).rejects.toThrow(expect.objectContaining({ name: "PluginPermissionError" })));
+    evi.removeStore("MessageStore");
+});
+
+test("lookup searches until it finds something, then keeps it without searching again", () => {
+    let searched = 0;
+    const thing = { tLookupThing: 1 };
+    const find = lookup<typeof thing>(value => (searched++, value === thing));
+    expect(find()).toBeUndefined();
+    const missed = searched;
+    expect(missed).toBeGreaterThan(0);
+    find();
+    expect(searched).toBeGreaterThan(missed);
+    evi.addExport(thing);
+    expect(find()).toBe(thing);
+    const after = searched;
+    expect(find()).toBe(thing);
+    expect(find()).toBe(thing);
+    expect(searched).toBe(after);
+});
+
+test("lookup gives undefined while webpack isn't loaded, and finds once it is", () => {
+    const thing = { tLookupLate: 1 };
+    evi.addExport(thing);
+    findOnPage = (() => { throw new Error("Webpack is not ready yet"); }) as typeof findOnPage;
+    const find = lookup<typeof thing>(value => value === thing);
+    try {
+        expect(find()).toBeUndefined();
+    } finally {
+        findOnPage = evi.module.find;
+    }
+    expect(find()).toBe(thing);
+});
+
+test("whenStore resolves at once with a store Discord has, and once Discord makes one it hasn't", async () => {
+    const ready = fakeStore({});
+    evi.addStore("TWhenReady", ready);
+    expect(await whenStore("TWhenReady")).toBe(ready);
+
+    const late = fakeStore({});
+    const waiting = whenStore("TWhenLate");
+    evi.addStore("TWhenLate", late);
+    expect(await waiting).toBe(late);
+});
+
+test("whenStore rejects with the signal's reason on abort, and stops waiting", async () => {
+    const abort = new AbortController();
+    const waiting = whenStore("TWhenAborted", abort.signal);
+    abort.abort();
+    await expect(waiting).rejects.toThrow(expect.objectContaining({ name: "AbortError" }));
+    // Made after the abort: nothing is left waiting to be called with it
+    let looked = 0;
+    evi.addStore("TWhenAborted", new Proxy({}, { get: () => (looked++, undefined) }));
+    expect(looked).toBe(0);
+
+    const reason = new Error("stopped");
+    await expect(whenStore("TWhenAborted", AbortSignal.abort(reason))).rejects.toBe(reason);
+    const custom = new AbortController();
+    const customWaiting = whenStore("TWhenCustom", custom.signal);
+    custom.abort(reason);
+    await expect(customWaiting).rejects.toBe(reason);
+});
+
+test("whenStore removes its abort listener once the store arrives", async () => {
+    const abort = new AbortController();
+    const added: string[] = [];
+    const removed: string[] = [];
+    const signal = abort.signal;
+    const realAdd = signal.addEventListener.bind(signal), realRemove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = (type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) => {
+        added.push(type);
+        realAdd(type, listener, options);
+    };
+    signal.removeEventListener = (type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) => {
+        removed.push(type);
+        realRemove(type, listener, options);
+    };
+    const waiting = whenStore("TWhenListener", signal);
+    evi.addStore("TWhenListener", fakeStore({}));
+    await waiting;
+    expect(added).toEqual(["abort"]);
+    expect(removed).toEqual(["abort"]);
+    // A store there already: no listener is added at all
+    await whenStore("TWhenListener", signal);
+    expect(added).toEqual(["abort"]);
+});
+
 test("subscribe calls the listener on each store's change until unsubscribed", () => {
     const a = fakeStore({});
     const b = fakeStore({});
@@ -145,7 +281,7 @@ test("subscribe calls the listener on each store's change until unsubscribed", (
     expect(a.listeners.size + b.listeners.size).toBe(0);
 });
 
-test("the same listener subscribed twice unsubscribes each subscription on its own", () => {
+test("the same listener subscribed twice unsubscribes each subscription separately", () => {
     const store = fakeStore({});
     let heard = 0;
     const listener = () => heard++;
@@ -210,7 +346,94 @@ test("useStore re-renders when a store it names arrives", () => {
     expect(store.listeners.size).toBe(0);
 });
 
-/** A plugin's own change source, not a Flux store */
+test("useStore listens to a source added to its list, and lets go of one taken out, without React warning", () => {
+    const a = fakeStore({ n: 1 });
+    const b = fakeStore({ n: 10 });
+    const c = fakeStore({ n: 100 });
+    function Sum({ sources }: { sources: (typeof a)[]; }) {
+        return React.createElement("span", null, String(useStore(sources, () => sources.reduce((sum, s) => sum + s.n, 0))));
+    }
+    const warned: unknown[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => void warned.push(args.map(String).join(" "));
+    let root!: ReturnType<typeof create>;
+    try {
+        act(() => { root = create(React.createElement(Sum, { sources: [a] })); });
+        expect(b.listeners.size).toBe(0);
+        // The list grows: a dependency array whose length changed would make React keep the old subscription
+        act(() => root.update(React.createElement(Sum, { sources: [a, b] })));
+        expect(root.toJSON()).toMatchObject({ children: ["11"] });
+        expect(b.listeners.size).toBe(1);
+        act(() => b.change({ n: 20 }));
+        expect(root.toJSON()).toMatchObject({ children: ["21"] });
+        act(() => root.update(React.createElement(Sum, { sources: [a, b, c] })));
+        act(() => c.change({ n: 200 }));
+        expect(root.toJSON()).toMatchObject({ children: ["221"] });
+        // The same sources in a new array keep the subscription
+        act(() => root.update(React.createElement(Sum, { sources: [a, b, c] })));
+        expect(a.listeners.size + b.listeners.size + c.listeners.size).toBe(3);
+        act(() => root.update(React.createElement(Sum, { sources: [c] })));
+        expect(a.listeners.size + b.listeners.size).toBe(0);
+        expect(c.listeners.size).toBe(1);
+        act(() => root.unmount());
+        expect(c.listeners.size).toBe(0);
+    } finally {
+        console.error = realError;
+    }
+    expect(warned.filter(line => !String(line).startsWith("react-test-renderer is deprecated"))).toEqual([]);
+});
+
+test("subscribe unsubscribes the sources before one that throws, then throws its error", () => {
+    const a = fakeStore({});
+    const broken: ChangeSource = { addChangeListener() { throw new Error("can't listen"); }, removeChangeListener() { } };
+    let heard = 0;
+    expect(() => subscribe([a, "TPendingStore", broken], () => heard++)).toThrow("can't listen");
+    expect(a.listeners.size).toBe(0);
+    // The wait for the store named before it was stopped too
+    const pending = fakeStore({});
+    evi.addStore("TPendingStore", pending);
+    expect(pending.listeners.size).toBe(0);
+    a.change({});
+    expect(heard).toBe(0);
+});
+
+test("whenStore takes { signal, timeout }, and rejects with a TimeoutError once the timeout passes", async () => {
+    const timedOut = whenStore("TWhenTimeout", { timeout: 10 });
+    await expect(timedOut).rejects.toThrow(expect.objectContaining({ name: "TimeoutError", message: 'whenStore: timed out waiting for "TWhenTimeout"' }));
+    expect(await timedOut.catch(e => e)).toBeInstanceOf(DOMException);
+    // Made after the timeout: nothing is left waiting for it
+    let looked = 0;
+    evi.addStore("TWhenTimeout", new Proxy({}, { get: () => (looked++, undefined) }));
+    expect(looked).toBe(0);
+
+    const ready = fakeStore({});
+    const arriving = whenStore("TWhenInTime", { timeout: 50 });
+    evi.addStore("TWhenInTime", ready);
+    expect(await arriving).toBe(ready);
+    expect(await whenStore("TWhenInTime", { timeout: 0 })).toBe(ready);
+
+    const reason = new Error("stopped");
+    const abort = new AbortController();
+    const aborted = whenStore("TWhenOptionsAbort", { signal: abort.signal, timeout: 1000 });
+    abort.abort(reason);
+    await expect(aborted).rejects.toBe(reason);
+    expect(await whenStore("TWhenInTime", {})).toBe(ready);
+});
+
+test("whenStore refuses a timeout setTimeout can't hold, which it would run at once", async () => {
+    for (const timeout of [3e9, 2_147_483_648, -1, Infinity]) {
+        await expect(whenStore("TWhenBadTimeout", { timeout })).rejects.toThrow(RangeError);
+    }
+    await expect(whenStore("TWhenBadTimeout", { timeout: 3e9 })).rejects.toThrow("whenStore: timeout must be");
+    await expect(whenStore("TWhenBadTimeout", { timeout: NaN })).rejects.toThrow(TypeError);
+    await expect(whenStore("TWhenBadTimeout", { timeout: "5" as never })).rejects.toThrow(TypeError);
+    // Nothing was left waiting
+    let looked = 0;
+    evi.addStore("TWhenBadTimeout", new Proxy({}, { get: () => (looked++, undefined) }));
+    expect(looked).toBe(0);
+});
+
+/** A change source a plugin makes, not a Flux store */
 class Counter implements ChangeSource {
     count = 0;
     private readonly listeners = new Set<() => void>();
@@ -222,7 +445,7 @@ class Counter implements ChangeSource {
     }
 }
 
-test("useStore and subscribe take a plugin's own change source", () => {
+test("useStore and subscribe take a change source a plugin makes", () => {
     const counter = new Counter();
     function Count() {
         return React.createElement("span", null, String(useStore(counter, () => counter.count)));

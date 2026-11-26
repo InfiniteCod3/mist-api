@@ -11,7 +11,7 @@ const native = async (method: string, ...args: unknown[]) => {
     if (method === "echo") return args[0];
     throw new Error(`no native method ${method}`);
 };
-const ctx = { id: "t-cdp", native: { call: native }, logger: { debug() { }, info() { }, warn() { }, error() { } }, settings: { all: {} }, onDispose() { } };
+const ctx = { id: "t-cdp", native: { call: native }, logger: { debug() { }, info() { }, warn() { }, error() { } }, settings: { all: {}, onChange: () => () => { } }, onDispose() { } };
 
 // A plugin that loads first keeps objects made before mist-api's, to forge from once the handle exists
 const early = Array.from({ length: 20 }, () => ({}));

@@ -1,12 +1,13 @@
 /**
  * The page-wide debug registry behind `window.Mist`. The first copy of mist-api installs it and later
- * copies join; each handle carries its own methods, so copies of different versions work together.
+ * copies join. Each handle carries its methods: copies of different versions work together.
  */
+import { attempt, globalSlot, unwrapAttempt } from "./internal.ts";
 import { patchHealth } from "./patches.ts";
 import type { CallRecord, LogRecord, ReducedNativeLogs } from "./protocol.ts";
 import type { Reduced } from "./values.ts";
 
-// A protocol name, not the package name: copies published under another name must still meet here
+/** A protocol name, not the package name: copies published under another name must still meet here */
 export const REGISTRY = Symbol.for("mist-api.registry.v1");
 
 /** What the plugin's native side turned out to be */
@@ -52,7 +53,7 @@ export interface MistHandle {
     /** Always refuses: calls go through the capability, which a debugger reads from the handle's private field */
     call(method: string, ...args: unknown[]): Promise<never>;
     /**
-     * Whether `value` is the plugin's own mist object. How `discord()` and the UI registries tell the
+     * Whether `value` is the plugin's mist object. How `discord()` and the UI registries tell the
      * plugin from code that only names its id. Copies of 0.2.1 and earlier have none.
      */
     owns?(value: unknown): boolean;
@@ -94,7 +95,7 @@ export interface EviDebug {
     diagnosePatches?(): PatchDiagnosis[];
     diagnoseLookups?(plugin?: string): LookupDiagnosis[];
     plugins?: {
-        get(id: string): { running?: boolean; error?: string; evaluated?: boolean; pulled?: unknown; manifest?: { name?: string; version?: string; enabledByDefault?: boolean; }; } | undefined;
+        get(id: string): { running?: boolean; error?: string; evaluated?: boolean; pulled?: unknown; manifest?: { name?: string; version?: string; enabledByDefault?: boolean; permissions?: unknown; }; } | undefined;
         subscribe?(listener: () => void): () => void;
     };
     /** Evi's settings: each plugin's switch is `data.plugins[id].enabled` */
@@ -112,12 +113,6 @@ function countBy<T>(items: T[], key: (item: T) => string) {
     return counts;
 }
 
-type Attempt<T> = { ok: true; value: T; } | { ok: false; error: string; };
-function attempt<T>(fn: () => T): Attempt<T> {
-    try { return { ok: true, value: fn() }; } catch (err) { return { ok: false, error: err instanceof Error ? err.message : String(err) }; }
-}
-const unwrap = <T, R>(result: Attempt<T>, show: (value: T) => R) => result.ok ? show(result.value) : { error: result.error };
-
 const reportsRunning = (handle: MistHandle) => attempt(() => handle.state().running === true);
 
 /**
@@ -134,7 +129,7 @@ export function concerns(id: string, handle: MistHandle, history: RegistryHistor
     return out;
 }
 
-/** Each registered plugin's state, with its patch and lookup health from Evi's own diagnostics */
+/** Each registered plugin's state, with its patch and lookup health from Evi's diagnostics */
 export function status(handles: MistHandle[], evi: EviDebug | undefined, registry?: Registry) {
     // One scan of every module for all plugins: diagnosePatches has no per-plugin form
     const patches = evi?.diagnosePatches ? attempt(() => evi.diagnosePatches!()) : null;
@@ -145,11 +140,11 @@ export function status(handles: MistHandle[], evi: EviDebug | undefined, registr
         return {
             id,
             mistVersion: handle.mistVersion,
-            state: unwrap(attempt(() => handle.state()), s => s),
+            state: unwrapAttempt(attempt(() => handle.state())),
             startError: evis?.ok ? evis.value?.error ?? null : null,
             registry: registry?.history?.(id) ?? null,
             concerns: registry?.concerns?.(id) ?? null,
-            patches: patches && unwrap(patches, all => {
+            patches: patches && unwrapAttempt(patches, all => {
                 const mine = all.filter(p => p.plugin === id).map(p => ({ ...p, health: patchHealth(p.health, p.patch) }));
                 return {
                     total: mine.length,
@@ -157,7 +152,7 @@ export function status(handles: MistHandle[], evi: EviDebug | undefined, registr
                     problems: mine.filter(p => PATCH_PROBLEMS.has(p.health)).map(p => ({ index: p.index, health: p.health, find: String(p.patch?.find), errors: p.errors ?? [] })),
                 };
             }),
-            lookups: lookups && unwrap(lookups, ours => ({
+            lookups: lookups && unwrapAttempt(lookups, ours => ({
                 total: ours.length,
                 health: countBy(ours, l => l.health),
                 problems: ours.filter(l => LOOKUP_PROBLEMS.has(l.health)).map(l => ({ target: l.target, health: l.health })),
@@ -215,26 +210,29 @@ function createRegistry(root: object): Registry {
 const usable = (value: unknown): value is Registry =>
     typeof value === "object" && value !== null && (value as Registry).version === 1 && typeof (value as Registry).register === "function";
 
-/** The page's registry, installed with `window.Mist` by the first copy to ask */
-export function registry(root: object = globalThis): Registry {
-    const target = root as Record<symbol, unknown>;
-    const existing = target[REGISTRY];
-    if (usable(existing)) return existing;
-    // Something else took the key: this copy keeps its own registry rather than break the plugin
-    if (existing !== undefined) return createRegistry(root);
-
+/** A fresh registry, with `window.Mist` reading it */
+function install(root: object): Registry {
     const created = createRegistry(root);
-    Object.defineProperty(target, REGISTRY, { value: created, configurable: false, enumerable: false, writable: false });
     const api = Object.freeze({
         version: 1 as const,
-        list: () => created.list().map(h => ({ id: h.id, mistVersion: h.mistVersion, running: unwrap(attempt(() => h.state().running), r => r) })),
+        list: () => created.list().map(h => ({ id: h.id, mistVersion: h.mistVersion, running: unwrapAttempt(attempt(() => h.state().running)) })),
         get: (id: string) => created.get(id),
         status: () => status(created.list(), eviOf(root), created),
     });
-    // Not configurable, so page code can't put a lying status in its place. Something that took the name first keeps it.
+    // Not configurable: page code can't put a lying status in its place. Something that took the name first keeps it.
     try {
         Object.defineProperty(root, "Mist", { get: () => api, configurable: false, enumerable: false });
     } catch { }
     return created;
+}
+
+/** The page's registry, installed with `window.Mist` by the first copy to ask */
+export function registry(root: object = globalThis): Registry {
+    try {
+        return globalSlot(REGISTRY, () => install(root), usable, "The debug registry", root);
+    } catch {
+        // Something else took the key: this copy keeps a private registry rather than break the plugin
+        return createRegistry(root);
+    }
 }
 

@@ -1,5 +1,6 @@
 /** mist restart --wait: waits for a plugin's page side to run in the restarted Discord */
-import { connect, type Connection, evaluate } from "./cdp.ts";
+import { connect, type Connection, evaluate, sleep } from "./cdp.ts";
+import { errorText } from "./format.ts";
 
 export interface WaitDeps {
     connect(port: number): Promise<Connection>;
@@ -8,9 +9,20 @@ export interface WaitDeps {
     now(): number;
 }
 
-const real: WaitDeps = { connect, evaluate, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), now: Date.now };
+const real: WaitDeps = { connect, evaluate, sleep, now: Date.now };
 
 export type WaitResult = { running: true; ms: number; } | { running: false; ms: number; last: string; };
+
+interface PluginReport { id: string; state: { running?: boolean; error?: string; }; startError?: string; }
+
+/** Why plugin `id` isn't running yet, from what `Mist.status()` answered */
+function notRunning(id: string, all: PluginReport[] | null, plugin: PluginReport | undefined): string {
+    if (!all) return "no mist-api plugin has loaded yet";
+    if (!plugin) return `${id} hasn't registered yet`;
+    if (plugin.startError) return `start error: ${plugin.startError}`;
+    if (plugin.state.error) return `state unreadable: ${plugin.state.error}`;
+    return `${id} is stopped`;
+}
 
 /**
  * Asks `Mist.status()` once a second until plugin `id` reports running, or `timeoutMs` passes.
@@ -21,21 +33,17 @@ export async function waitForPlugin(port: number, id: string, timeoutMs: number,
     const start = now();
     let last = "Discord isn't answering on its debugging port yet";
     for (; ;) {
-        let c: Connection | null = null;
+        let conn: Connection | null = null;
         try {
-            c = await connect(port);
-            const all = await evaluate<{ id: string; state: { running?: boolean; error?: string; }; startError?: string; }[] | null>(c.send, `globalThis.Mist ? Mist.status() : null`);
-            const plugin = all?.find(p => p.id === id);
+            conn = await connect(port);
+            const all = await evaluate<PluginReport[] | null>(conn.send, `globalThis.Mist ? Mist.status() : null`);
+            const plugin = all?.find(report => report.id === id);
             if (plugin?.state.running && !plugin.state.error) return { running: true, ms: now() - start };
-            last = !all ? "no mist-api plugin has loaded yet"
-                : !plugin ? `${id} hasn't registered yet`
-                    : plugin.startError ? `start error: ${plugin.startError}`
-                        : plugin.state.error ? `state unreadable: ${plugin.state.error}`
-                            : `${id} is stopped`;
+            last = notRunning(id, all, plugin);
         } catch (err) {
-            last = (err as Error).message;
+            last = errorText(err);
         } finally {
-            c?.close();
+            conn?.close();
         }
         if (now() - start >= timeoutMs) return { running: false, ms: now() - start, last };
         await sleep(1000);
@@ -43,7 +51,7 @@ export async function waitForPlugin(port: number, id: string, timeoutMs: number,
 }
 
 /** The one line `mist restart --wait` prints */
-export function waitLine(id: string, r: WaitResult): string {
-    const s = (r.ms / 1000).toFixed(1);
-    return r.running ? `${id} is running, ${s} s after the restart` : `${id} isn't running after ${s} s: ${r.last}`;
+export function waitLine(id: string, result: WaitResult): string {
+    const seconds = (result.ms / 1000).toFixed(1);
+    return result.running ? `${id} is running, ${seconds} s after the restart` : `${id} isn't running after ${seconds} s: ${result.last}`;
 }

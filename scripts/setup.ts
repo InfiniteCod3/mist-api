@@ -13,15 +13,22 @@ const link = join(root, ".evi");
 const force = process.argv.includes("--force");
 const isEvi = (dir: string) => existsSync(join(dir, "src", "api", "index.ts"));
 
+/** No shell: arguments such as the checkout's path go through as they are, spaces and all */
 function run(cmd: string, args: string[], cwd = root) {
-    execFileSync(cmd, args, { cwd, stdio: "inherit", shell: process.platform === "win32" });
+    execFileSync(cmd, args, { cwd, stdio: "inherit" });
 }
+/** The bun running this script, so no PATH lookup of a `bun.cmd` shim is needed on Windows */
+const bun = process.versions.bun ? process.execPath : "bun";
 
 const lstat = (path: string) => { try { return lstatSync(path); } catch { return null; } };
-/** Removes a link as a link: following it would delete the Evi checkout it points at */
+/**
+ * Removes a link as a link: following it would delete the Evi checkout it points at. A real folder
+ * is deleted only with --force.
+ */
 const remove = (path: string) => {
     const stat = lstat(path);
     if (stat?.isSymbolicLink()) unlinkSync(path);
+    else if (stat && !force) throw new Error(`${path} is a folder, not a link. Rerun with --force to delete it.`);
     else if (stat) rmSync(path, { recursive: true, force: true });
 };
 const linkDir = (target: string, path: string) => symlinkSync(target, path, process.platform === "win32" ? "junction" : "dir");
@@ -43,7 +50,7 @@ if (lstat(link) && !force) {
 }
 
 // Types only: no install scripts, since Electron downloads its binary in one
-if (!existsSync(join(link, "node_modules"))) run("bun", ["install", "--ignore-scripts"], link);
+if (!existsSync(join(link, "node_modules"))) run(bun, ["install", "--ignore-scripts"], link);
 
 // tsconfig.build.json reads Evi through node_modules, so the compiler neither emits it nor checks its rootDir
 const types = join(root, "node_modules", ".evi");

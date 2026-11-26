@@ -1,6 +1,6 @@
 /** mist inspect: an element's layout and its ancestors', with the CSS rules that set it */
-import { evaluate, type Send } from "./cdp.ts";
-import { pageExpression } from "./page.ts";
+import type { Send } from "./cdp.ts";
+import { pageCall } from "./page.ts";
 
 export interface Rule { selector: string; source: string; conditions: string[]; declarations: string[]; }
 export interface Box {
@@ -35,7 +35,7 @@ function inspectPage(selector: string, depth: number, all: boolean): Inspected {
     const collect = (list: CSSRuleList, source: string, conditions: string[]) => {
         for (const rule of Array.from(list)) {
             if (rule instanceof CSSStyleRule) {
-                const declarations = rule.style.cssText.split(/;(?![^(]*\))/).map(d => d.trim()).filter(d => LAYOUT.test(d));
+                const declarations = rule.style.cssText.split(/;(?![^(]*\))/).map(declaration => declaration.trim()).filter(declaration => LAYOUT.test(declaration));
                 if (declarations.length) rules.push({ rule, source, conditions, declarations });
             } else if (rule instanceof CSSMediaRule) {
                 if (matchMedia(rule.media.mediaText).matches) collect(rule.cssRules, source, [...conditions, `@media ${rule.media.mediaText}`]);
@@ -47,11 +47,13 @@ function inspectPage(selector: string, depth: number, all: boolean): Inspected {
     };
     for (const sheet of Array.from(document.styleSheets)) {
         const owner = sheet.ownerNode as Element | null;
-        const source = sheet.href ? sheet.href.replace(/[?#].*$/, "").split("/").pop()! : owner?.id ? `<style id="${owner.id}">` : "<style>";
+        let source = "<style>";
+        if (sheet.href) source = sheet.href.replace(/[?#].*$/, "").split("/").pop()!;
+        else if (owner?.id) source = `<style id="${owner.id}">`;
         try { collect(sheet.cssRules, source, []); } catch { skippedSheets++; }
     }
 
-    const label = (el: Element) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : "") + Array.from(el.classList).map(c => `.${c}`).join("");
+    const label = (el: Element) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : "") + Array.from(el.classList).map(name => `.${name}`).join("");
     const box = (el: Element): Box => {
         const computed = getComputedStyle(el);
         const style: Record<string, string> = {};
@@ -59,13 +61,13 @@ function inspectPage(selector: string, depth: number, all: boolean): Inspected {
             const value = computed.getPropertyValue(property);
             if (value && !initial.includes(value)) style[property] = value;
         }
-        const r = el.getBoundingClientRect();
+        const rect = el.getBoundingClientRect();
         const matches = (selector: string) => {
             try { return el.matches(selector); } catch { return false; }
         };
         // A list such as a reset's "a, abbr, ..., div" shows as the selectors in it that match; one with ::before can't be matched whole
         const matching = rules.flatMap(({ rule, source, conditions, declarations }) => {
-            const parts = rule.selectorText.split(/,(?![^(]*\))(?![^[]*\])/).map(s => s.trim());
+            const parts = rule.selectorText.split(/,(?![^(]*\))(?![^[]*\])/).map(part => part.trim());
             if (parts.length === 1) return matches(parts[0]) ? [{ selector: parts[0], source, conditions, declarations }] : [];
             const hit = parts.filter(matches);
             return hit.length ? [{ selector: `${hit.join(", ")}${hit.length < parts.length ? ` (${hit.length} of ${parts.length} selectors)` : ""}`, source, conditions, declarations }] : [];
@@ -74,7 +76,7 @@ function inspectPage(selector: string, depth: number, all: boolean): Inspected {
             tag: el.tagName.toLowerCase(),
             id: el.id,
             classes: Array.from(el.classList),
-            rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width * 10) / 10, height: Math.round(r.height * 10) / 10 },
+            rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width * 10) / 10, height: Math.round(rect.height * 10) / 10 },
             style,
             children: { count: el.children.length, first: Array.from(el.children).slice(0, 5).map(label) },
             inline: el.getAttribute("style") ?? "",
@@ -92,25 +94,33 @@ function inspectPage(selector: string, depth: number, all: boolean): Inspected {
 }
 
 export const inspect = (send: Send, selector: string, depth: number, all: boolean) =>
-    evaluate<Inspected>(send, pageExpression(inspectPage, [selector, depth, all]));
+    pageCall(send, inspectPage, [selector, depth, all]);
 
-const name = (b: Box) => b.tag + (b.id ? `#${b.id}` : "") + b.classes.map(c => `.${c}`).join("");
+const name = (box: Box) => box.tag + (box.id ? `#${box.id}` : "") + box.classes.map(className => `.${className}`).join("");
+
+function childrenLine({ count, first }: Box["children"]): string {
+    if (!first.length) return `  children: ${count}`;
+    return `  children: ${count} (${first.join(", ")}${count > first.length ? ", …" : ""})`;
+}
+
+function boxLines(box: Box, level: number): string[] {
+    const { x, y, width, height } = box.rect;
+    const out = ["", `${level ? `parent ${level}` : "element"}  ${name(box)}  ${width}x${height} at ${x},${y}`];
+    const style = Object.entries(box.style).map(([property, value]) => `${property}: ${value}`);
+    if (style.length) out.push(`  ${style.join("; ")}`);
+    out.push(childrenLine(box.children));
+    if (box.inline) out.push(`  style="${box.inline}"`);
+    for (const rule of box.rules) out.push(`  ${[...rule.conditions, rule.selector].join(" ")} { ${rule.declarations.join("; ")} }  ${rule.source}`);
+    return out;
+}
 
 export function inspectLines({ matches, elements, skippedSheets }: Inspected, selector: string): string[] {
     if (!matches) return [`Nothing matches ${selector}`];
     const out = [`${matches} ${matches === 1 ? "element matches" : "elements match"} ${selector}${elements.length < matches ? ", showing the first (--all shows each)" : ""}`];
-    if (skippedSheets) out.push(`${skippedSheets} stylesheets couldn't be read (another origin), so their rules aren't listed`);
+    if (skippedSheets) out.push(`${skippedSheets} stylesheets from another origin couldn't be read: their rules aren't listed`);
     elements.forEach((chain, i) => {
         if (elements.length > 1) out.push("", `match ${i + 1}`);
-        chain.forEach((b, level) => {
-            const { x, y, width, height } = b.rect;
-            out.push("", `${level ? `parent ${level}` : "element"}  ${name(b)}  ${width}x${height} at ${x},${y}`);
-            const style = Object.entries(b.style).map(([k, v]) => `${k}: ${v}`);
-            if (style.length) out.push(`  ${style.join("; ")}`);
-            out.push(`  children: ${b.children.count}${b.children.first.length ? ` (${b.children.first.join(", ")}${b.children.count > b.children.first.length ? ", …" : ""})` : ""}`);
-            if (b.inline) out.push(`  style="${b.inline}"`);
-            for (const r of b.rules) out.push(`  ${[...r.conditions, r.selector].join(" ")} { ${r.declarations.join("; ")} }  ${r.source}`);
-        });
+        chain.forEach((box, level) => out.push(...boxLines(box, level)));
     });
     return out;
 }

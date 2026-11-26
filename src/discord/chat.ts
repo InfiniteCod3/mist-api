@@ -1,6 +1,6 @@
-import { filters, find, findAll } from "@evi/api";
+import { filters, findAll } from "@evi/api";
 
-import { stores } from "../stores.ts";
+import { lookup, stores } from "../stores.ts";
 
 /** Discord's ComponentDispatch: an event emitter its components listen on */
 interface ComponentDispatch {
@@ -23,26 +23,30 @@ interface MessageActions {
     sendBotMessage?(channelId: string, content: string): void;
 }
 
+// Made on first use: importing this module then doesn't call into @evi/api
+let messageActions: (() => MessageActions | undefined) | undefined;
+
 export const chat = {
     /**
      * Types `text` into the message box at the cursor. Nothing is sent. False when no message box is open.
      */
     insertText(text: string): boolean {
         // Discord makes more than one ComponentDispatch; the message box listens on one of them
-        const box = findAll<unknown>(isComponentDispatch).filter(isComponentDispatch).find(listens);
+        const box = findAll<ComponentDispatch>(isComponentDispatch).find(listens);
         if (!box) return false;
         box.dispatchToLastSubscribed("INSERT_TEXT", { plainText: text, rawText: text });
         return true;
     },
 
     /**
-     * Shows `text` in a channel as Discord's own "Only you can see this" message. Nothing is sent, and
-     * it's gone on reload. The channel defaults to the one open.
+     * Shows `text` in a channel as Discord's "Only you can see this" message. Nothing is sent, and it's
+     * gone on reload. The channel defaults to the one open.
      */
     localMessage(text: string, channelId: string | undefined = stores.selectedChannel?.getChannelId()): void {
-        if (!channelId) throw new Error("No channel is open to show the message in");
-        const actions = find<MessageActions>(filters.byProps("sendBotMessage", "sendMessage"));
-        if (typeof actions?.sendBotMessage !== "function") throw new Error("Discord's local messages aren't available");
+        if (!channelId) throw new Error("chat.localMessage: no channel is open to show the message in");
+        messageActions ??= lookup<MessageActions>(filters.byProps("sendBotMessage", "sendMessage"));
+        const actions = messageActions();
+        if (typeof actions?.sendBotMessage !== "function") throw new Error("chat.localMessage: Discord's local messages aren't available");
         actions.sendBotMessage(channelId, text);
     },
 };

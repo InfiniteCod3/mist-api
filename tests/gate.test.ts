@@ -111,3 +111,21 @@ test("nothing page code can read from the handle leads to the capability", async
     expect(reachable).not.toContain(capability);
     expect(Object.isFrozen(handle) && Object.isFrozen(capability)).toBe(true);
 });
+
+test("the capability's first nativeLogs call, before any probe, gets whole records when main has a debugging port", async () => {
+    const asked: unknown[] = [];
+    const run = fakeContext({
+        native: async (method, ...args) => {
+            if (method === "__mist_debugAllowed") return true;
+            if (method !== "__mist_logs") throw new Error(`no native method ${method}`);
+            asked.push(args[1]);
+            return { full: args[1] === true, calls: [], logs: [] };
+        },
+    });
+    const { capability } = createDebug({
+        id: "t-gate-first", recorder: createRecorder({ keepValues: true }), exposed: new Map(), context: () => run.ctx,
+        startedAt: () => 0, callNative: async () => undefined, provides: {}, warnings: () => [], owns: () => false,
+    });
+    expect((await capability.nativeLogs(5))?.full).toBe(true);
+    expect(asked).toEqual([true]);
+});

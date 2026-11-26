@@ -1,8 +1,10 @@
 import type { NativeContext } from "@evi/api/native";
 import { afterAll, expect, test } from "bun:test";
+import { getEventListeners } from "node:events";
 import { join } from "node:path";
 
 import { createMist, MistNativeError } from "../src/index";
+import type { CallAnswer } from "../src/protocol";
 import { HttpError } from "../src/util";
 import { copyOfRelease, copyOfSources } from "./copies";
 import { fakeContext } from "../src/testing";
@@ -207,4 +209,43 @@ test("state a method keeps on this lands on the module, as before calls had thei
     expect(await mist.native.bump()).toBe(1);
     expect(await mist.native.bump.with({ signal: new AbortController().signal })()).toBe(2);
     expect((module as { count?: number; }).count).toBe(2);
+});
+
+test("an abort that reaches the native side before its call starts that call aborted, once", async () => {
+    const { native } = await freshNative();
+    const module = native.defineNative({
+        look(): boolean { return this.signal.aborted; },
+    });
+    module.start({ pluginId: "t-early-abort" } as NativeContext);
+    /** What Electron runs for a page's marked call */
+    const call = (id: string) => Reflect.apply(module.look, module, [{ __mist_call: 1, id }]) as Promise<CallAnswer>;
+
+    expect(module.__mist_abort("call-1")).toBe(false);
+    expect(await call("call-1")).toEqual({ __mist_answer: 1, ok: true, value: true });
+    expect(await call("call-1")).toEqual({ __mist_answer: 1, ok: true, value: false });
+    expect(await call("call-2")).toEqual({ __mist_answer: 1, ok: true, value: false });
+    module.stop();
+});
+
+test("a finished call leaves no listener on the run's signal, so long runs don't pile them up", async () => {
+    const { native } = await freshNative();
+    let runSignal: AbortSignal | undefined;
+    let release = () => { };
+    const module = native.defineNative({
+        start() { runSignal = this.signal; },
+        quick(): number { return 1; },
+        slow(): Promise<void> { return new Promise(resolve => { release = resolve; }); },
+    });
+    module.start({ pluginId: "t-listeners" } as NativeContext);
+    const { mist } = page<typeof module>("t-listeners", module);
+    const marked = { signal: new AbortController().signal };
+
+    for (let i = 0; i < 20; i++) await mist.native.quick.with(marked)();
+    expect(getEventListeners(runSignal!, "abort")).toHaveLength(0);
+    const pending = mist.native.slow.with(marked)();
+    while (getEventListeners(runSignal!, "abort").length === 0) await new Promise(resolve => setTimeout(resolve, 1));
+    release();
+    await pending;
+    expect(getEventListeners(runSignal!, "abort")).toHaveLength(0);
+    module.stop();
 });

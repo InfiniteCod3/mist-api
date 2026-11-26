@@ -68,6 +68,16 @@ const scenarios: Record<string, () => Promise<unknown>> = {
         const seen = await watch({ types: ["A"], count: 2, limits: DISPLAY });
         return { seen, after: listeners() };
     },
+    async unreadable() {
+        later(5, () => {
+            // Copying the payload runs its getter, which throws
+            D.dispatch({ type: "A", get boom(): unknown { throw new Error("getter"); } });
+            D.dispatch({ type: "A", n: 1 });
+            D.dispatch({ type: "A", n: 2 });
+        });
+        const seen = await watch({ types: ["A"], count: 2, limits: DISPLAY });
+        return { seen, after: listeners() };
+    },
     async every() {
         const other: string[] = [];
         later(5, () => {

@@ -69,7 +69,7 @@ export default mist.define({
 });
 ```
 
-The listener's type comes from the native module, so `event` is a `NoteEvent`.
+The listener's type comes from the native module: `event` is a `NoteEvent`.
 
 ## nativeEvents
 
@@ -97,7 +97,7 @@ Makes a channel. Make it once, at module level in `native.ts`, and pass it to `d
 | `live` | all | Checked each time an event is handed out. An event it rejects is left out of that answer. Use it for an event that stops being true after it is pushed, such as a request that was answered. |
 | `waitMs` | `25000` | How long a poll waits for an event before it answers empty. |
 
-`push` gives each event the next sequence number and wakes every waiting poll. Events cross Electron's IPC, so push plain data that structured clone can copy.
+`push` gives each event the next sequence number and wakes every waiting poll. Events cross Electron's IPC. Push plain data that structured clone can copy. `push` checks this first and throws a `NativeError` with the code `unclonable` for an event it can't copy, such as one that holds a function. Such an event would otherwise fail every poll that it's in.
 
 `defineNative` throws `defineNative's events must come from nativeEvents` for any other object.
 
@@ -114,15 +114,17 @@ interface SubscribeOptions {
 
 Calls `listener` with each event, in push order, each one once. Call it while the plugin runs, such as in `start`. It throws the `mist.ctx` error when the plugin isn't running.
 
-It returns a function that ends the subscription. The subscription also ends when the run is disposed, so a plugin doesn't need to call it on stop. After it ends, no new poll starts, and the answer of a poll in flight is ignored.
+It returns a function that ends the subscription. The subscription also ends when the run is disposed, and a plugin doesn't need to call it on stop. After it ends, no new poll starts, and the answer of a poll in flight is ignored.
 
-`onConnect` loads the page's state. It runs before the first events are delivered, and again each time the page has to load its state again. It can return a promise, and no events are delivered until it settles. If it throws or rejects, the subscription waits `retryMs` and connects again. `retryMs` also applies after a failed poll. Its default is `2000`.
+`onConnect` loads the page's state. It runs before the first events are delivered, and again each time the page has to load its state again. It can return a promise, and no events are delivered until it settles. If it throws or rejects, the subscription waits and connects again. The same wait follows a failed poll. The first wait is `retryMs`, 2000 by default, and each failure in a row doubles it, up to 30 s, with a little randomness. A good answer resets it.
+
+When the plugin has no native module, or its native side has no event poll, the subscription logs `The native side has no event channel; stopped listening` and ends, instead of trying again.
 
 A listener that throws doesn't stop the subscription. Each distinct failure is logged once through `mist.log`, as `mist.safe` does.
 
-Each call to `subscribe` runs its own poll. Two subscribers each get every event.
+Each call to `subscribe` runs a separate poll. Two subscribers each get every event.
 
-When the plugin's native module has no channel, `subscribe` takes no listener, so the typecheck fails.
+When the plugin's native module has no channel, `subscribe` takes no listener and the typecheck fails.
 
 ## Connecting and restarts
 
@@ -131,14 +133,14 @@ A page connects when it subscribes. Its first poll answers at once. Then `onConn
 The page loads its state again, by running `onConnect` and then getting the replayed events, in these cases:
 
 - It just subscribed.
-- The native side restarted. Each run of the native side has its own boot id, sent with each answer. A `start` after a `stop` empties the log and draws a new boot id, so a page that polls with the old id connects again. A page that reloads connects again in the same way.
+- The native side restarted. Each run of the native side has a new boot id, sent with each answer. A `start` after a `stop` empties the log and draws a new boot id. A page that polls with the old id connects again. A page that reloads connects again in the same way.
 - The page fell behind. When the events after its last answer are no longer in the log, because more than `keep` were pushed since, it connects again instead of missing them.
 
-An event pushed while `onConnect` runs comes in the next answer, so it isn't lost.
+An event pushed while `onConnect` runs comes in the next answer and isn't lost.
 
 ## Stop
 
-The native module's `stop` runs your `stop` and then answers every waiting poll at once, with no events. A poll while the native side is stopped fails with `The native side is stopped`, and the page tries again after `retryMs`. A poll never hangs until `waitMs` because the native side stopped.
+The native module's `stop` runs your `stop` and then answers every waiting poll at once, with no events. A poll while the native side is stopped fails with `The native side is stopped`, and the page tries again after its wait. A poll never hangs until `waitMs` because the native side stopped.
 
 ## Recording
 
@@ -146,4 +148,4 @@ The poll is a hidden native method, `__mist_events`. Its calls are counted on bo
 
 ## Transport
 
-The page long-polls over Evi's `ctx.native.call`. The page never sees a cursor, a boot id, or a poll, so the transport can change without changes to plugin code.
+The page long-polls over Evi's `ctx.native.call`. The page never sees a cursor, a boot id, or a poll. The transport can change without changes to plugin code.

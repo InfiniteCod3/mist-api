@@ -1,4 +1,5 @@
-import { type CallOutcome, type CallRecord, errorMessage, type LogLevel, type LogRecord, type Shown } from "./protocol.ts";
+import { errorMessage } from "./internal.ts";
+import { type CallOutcome, type CallRecord, type LogLevel, type LogRecord, type Shown } from "./protocol.ts";
 import { Ring } from "./ring.ts";
 import { describe, MASKED, type Reduced, secretTest, type Snapshot, snapshot } from "./values.ts";
 
@@ -8,7 +9,7 @@ export interface RecordingOptions<Name extends string = string> {
     capacity?: number;
     /** Field and Map key names masked in recorded values, on top of the built-in ones (token, password, cookie...) */
     secrets?: readonly string[];
-    /** Field and Map key names shown even though a built-in name would mask them, as in sessionId. The plugin's own secrets stay masked. */
+    /** Field and Map key names shown even though a built-in name would mask them, as in sessionId. The plugin's secrets stay masked. */
     reveal?: readonly string[];
     /**
      * Positions of arguments masked in each method's recorded calls, counting from 0, for a secret
@@ -39,9 +40,14 @@ export function createRecorder({ capacity = 200, secrets, reveal, secretArgs = {
     const isSecret = secretTest(secrets, reveal);
     const quietNames = new Set<string>(quiet);
     const quietCounts = new Map<string, number>();
+    // A value that can't be copied (a hostile Proxy) must never break the call or log line around it
     const keep = (value: unknown): Snapshot => {
-        const snap = snapshot(value, isSecret);
-        return keepValues ? snap : describe(snap);
+        try {
+            const snap = snapshot(value, isSecret);
+            return keepValues ? snap : describe(snap);
+        } catch {
+            return "[unrecordable]";
+        }
     };
     // Without keepValues every record is reduced already, and reducing it again would describe the description
     const reduce = (value: Snapshot): Reduced => keepValues ? describe(value) : value as Reduced;

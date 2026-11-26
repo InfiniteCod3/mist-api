@@ -65,8 +65,8 @@ function boundaryClass() {
 }
 
 /**
- * Catches errors while its children render, so a plugin's broken UI shows a small fallback instead
- * of taking Discord's surrounding UI down. Each distinct error is logged once.
+ * Catches errors while its children render: a plugin's broken UI shows a small fallback instead of
+ * taking Discord's surrounding UI down. Each distinct error is logged once.
  */
 export function Boundary(props: BoundaryProps) {
     return React.createElement(boundaryClass(), props);

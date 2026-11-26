@@ -1,4 +1,6 @@
-/** The native side of a plugin's event channel. Evi's native side can't push to the page, so the page long-polls a hidden method. */
+/** The native side of a plugin's event channel. Evi's native side can't push to the page: the page long-polls a hidden method. */
+import { NativeError } from "./errors.ts";
+import { checkDelay, checkNumber, errorMessage } from "./internal.ts";
 import type { EventsAnswer } from "./protocol.ts";
 
 export interface NativeEventsOptions<E> {
@@ -14,6 +16,7 @@ export interface NativeEventsOptions<E> {
 
 /** A channel from the native side to the page. Pass it to defineNative as `events`. */
 export interface NativeEvents<E> {
+    /** Throws a NativeError "unclonable" for an event IPC can't structured-clone, which would fail every poll it's in */
     push(event: E): void;
 }
 
@@ -29,15 +32,31 @@ const channels = new WeakMap<object, EventChannel<unknown>>();
 /** The channel behind `events`, or undefined when `events` didn't come from nativeEvents */
 export const channelOf = <E>(events: NativeEvents<E>) => channels.get(events) as EventChannel<E> | undefined;
 
+/** Throws a NativeError "unclonable" when IPC couldn't carry `value` to the page */
+export function assertClonable(fn: string, value: unknown, what: string) {
+    try {
+        structuredClone(value);
+    } catch (err) {
+        throw new NativeError("unclonable", undefined, `${fn}: ${what} can't cross IPC (${errorMessage(err)})`);
+    }
+}
+
 /**
  * Makes an event channel. Every pushed event gets the next sequence number and the last `keep` are
- * kept. Each run of the native side has its own boot id: a start after a stop begins an empty log
- * under a new id, so a page polling with the old id loads its state again.
+ * kept. Each run of the native side has a boot id: a start after a stop begins an empty log under a
+ * new id, and a page polling with the old id loads its state again.
  */
 export function nativeEvents<E>(options: NativeEventsOptions<E> = {}): NativeEvents<E> {
+    const { events, channel } = createEventChannel(options);
+    channels.set(events, channel);
+    return events;
+}
+
+/** nativeEvents with its channel, for a module of mist's that drives the channel itself */
+export function createEventChannel<E>(options: NativeEventsOptions<E> = {}): { events: NativeEvents<E>; channel: EventChannel<E>; } {
     const { keep = 1000, replay = () => false, live = () => true, waitMs = 25_000 } = options;
-    if (!Number.isInteger(keep) || keep < 1) throw new RangeError(`keep must be a positive integer, got ${keep}`);
-    if (!(waitMs >= 0)) throw new RangeError(`waitMs must be 0 or more, got ${waitMs}`);
+    checkNumber("nativeEvents", "keep", keep, { min: 1, integer: true });
+    checkDelay("nativeEvents", "waitMs", waitMs);
 
     let boot = crypto.randomUUID();
     let seq = 0;
@@ -61,15 +80,16 @@ export function nativeEvents<E>(options: NativeEventsOptions<E> = {}): NativeEve
 
     const events: NativeEvents<E> = {
         push(event) {
+            assertClonable("nativeEvents.push", event, "the event");
             log.push({ seq: ++seq, event });
             if (log.length > keep) log.splice(0, log.length - keep);
             wakeAll();
         },
     };
 
-    channels.set(events, {
+    const channel: EventChannel<E> = {
         async poll(pageBoot, cursor) {
-            if (stopped) throw new Error("The native side is stopped");
+            if (stopped) throw new NativeError("stopped", undefined, "nativeEvents: the native side is stopped");
             let from = position(pageBoot, cursor);
             if (from !== null && from === seq && waitMs > 0) {
                 await new Promise<void>(resolve => {
@@ -96,7 +116,7 @@ export function nativeEvents<E>(options: NativeEventsOptions<E> = {}): NativeEve
             stopped = true;
             wakeAll();
         },
-    } satisfies EventChannel<E> as EventChannel<unknown>);
+    };
 
-    return events;
+    return { events, channel };
 }

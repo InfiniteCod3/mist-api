@@ -1,9 +1,11 @@
+import { checkNumber } from "./internal.ts";
+
 /** Keeps the last `capacity` items pushed, oldest first */
 export class Ring<T> {
     private readonly items: T[] = [];
 
     constructor(readonly capacity: number) {
-        if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError(`Ring capacity must be a positive integer, got ${capacity}`);
+        checkNumber("Ring", "capacity", capacity, { min: 1, integer: true });
     }
 
     push(item: T) {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { backoff, keepConnected, limit, parseSse, shared, sharedByKey, sseEvents, ttlCache } from "../src/util";
+import { checkNumber, createLogOnce, globalSlot, MAX_TIMEOUT_MS, notifyEach } from "../src/internal";
+import { backoff, debounce, fetchJson, fetchWithTimeout, HttpError, isSnowflake, keepConnected, limit, parseSse, shared, sharedByKey, sleep, sseEvents, ttlCache, until, withTimeout } from "../src/util";
 
 /** A promise with its resolve and reject outside */
 function deferred<T = void>() {
@@ -99,12 +100,13 @@ describe("backoff", () => {
         expect(backoff({ random: () => 5 }).next()).toBe(1000);
     });
 
-    test("bad options throw a TypeError", () => {
-        expect(() => backoff({ jitter: 2 })).toThrow(TypeError);
-        expect(() => backoff({ baseMs: -1 })).toThrow(TypeError);
-        expect(() => backoff({ baseMs: 10, maxMs: 5 })).toThrow(TypeError);
-        expect(() => backoff({ factor: 0.5 })).toThrow(TypeError);
-        expect(() => backoff({ maxMs: Infinity })).toThrow(TypeError);
+    test("bad options throw: a TypeError for a non-number, a RangeError for one out of range", () => {
+        expect(() => backoff({ jitter: 2 })).toThrow(RangeError);
+        expect(() => backoff({ baseMs: -1 })).toThrow(RangeError);
+        expect(() => backoff({ baseMs: 10, maxMs: 5 })).toThrow(RangeError);
+        expect(() => backoff({ factor: 0.5 })).toThrow(RangeError);
+        expect(() => backoff({ maxMs: Infinity })).toThrow(RangeError);
+        expect(() => backoff({ baseMs: "1" as never })).toThrow("backoff: baseMs must be a number");
     });
 });
 
@@ -342,9 +344,9 @@ describe("ttlCache", () => {
         expect(cache.size).toBe(0);
     });
 
-    test("bad options throw a TypeError", () => {
+    test("bad options throw: a TypeError for a non-number, a RangeError for one out of range", () => {
         expect(() => ttlCache({ ttlMs: NaN })).toThrow(TypeError);
-        expect(() => ttlCache({ ttlMs: 1, max: 0 })).toThrow(TypeError);
+        expect(() => ttlCache({ ttlMs: 1, max: 0 })).toThrow(RangeError);
     });
 });
 
@@ -383,7 +385,340 @@ describe("limit", () => {
     });
 
     test("n must be a whole number above 0", () => {
-        expect(() => limit(0)).toThrow(TypeError);
-        expect(() => limit(1.5)).toThrow(TypeError);
+        expect(() => limit(0)).toThrow(RangeError);
+        expect(() => limit(1.5)).toThrow("limit: n must be a whole number from 1, got 1.5");
+        expect(() => limit("2" as never)).toThrow(TypeError);
+    });
+});
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Counts the abort listeners on `signal` that are still attached */
+function countListeners(signal: AbortSignal) {
+    const live = new Set<unknown>();
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, fn: unknown, ...rest: unknown[]) => {
+        if (type === "abort") live.add(fn);
+        return (add as (...args: unknown[]) => void)(type, fn, ...rest);
+    }) as typeof add;
+    signal.removeEventListener = ((type: string, fn: unknown, ...rest: unknown[]) => {
+        if (type === "abort") live.delete(fn);
+        return (remove as (...args: unknown[]) => void)(type, fn, ...rest);
+    }) as typeof remove;
+    return () => live.size;
+}
+
+// Timer margins are wide: Windows timers tick every 15.6ms, so a 5ms wait can take 16
+describe("debounce", () => {
+    test("calls once with the last arguments after calls stop for the delay", async () => {
+        const calls: number[][] = [];
+        const save = debounce((a: number, b: number) => void calls.push([a, b]), 80);
+        save(1, 1);
+        save(2, 2);
+        await wait(10);
+        save(3, 3);
+        expect(calls).toEqual([]);
+        await wait(200);
+        expect(calls).toEqual([[3, 3]]);
+    });
+
+    test("flush runs the pending call now, once, and cancel drops it", async () => {
+        const calls: string[] = [];
+        const save = debounce((value: string) => void calls.push(value), 10);
+        save("a");
+        save.flush();
+        save.flush();
+        save("b");
+        save.cancel();
+        await wait(60);
+        expect(calls).toEqual(["a"]);
+    });
+
+    test("a signal drops the pending call on abort, or runs it with flushOnAbort, and calls after it do nothing", async () => {
+        const calls: string[] = [];
+        const dropping = new AbortController();
+        const drop = debounce((value: string) => void calls.push(`drop ${value}`), 10, { signal: dropping.signal });
+        const flushing = new AbortController();
+        const keep = debounce((value: string) => void calls.push(`keep ${value}`), 10, { signal: flushing.signal, flushOnAbort: true });
+        drop("a");
+        keep("a");
+        dropping.abort();
+        flushing.abort();
+        drop("b");
+        keep("b");
+        await wait(60);
+        expect(calls).toEqual(["keep a"]);
+    });
+
+    test("holds an abort listener on its signal only while a call is pending", async () => {
+        const controller = new AbortController();
+        const listeners = countListeners(controller.signal);
+        // As a component makes one per render: none of them may leave a listener behind
+        for (let i = 0; i < 20; i++) debounce(() => { }, 10, { signal: controller.signal });
+        expect(listeners()).toBe(0);
+        const save = debounce(() => { }, 10, { signal: controller.signal });
+        save();
+        save();
+        expect(listeners()).toBe(1);
+        save.cancel();
+        expect(listeners()).toBe(0);
+        save();
+        save.flush();
+        expect(listeners()).toBe(0);
+        save();
+        await wait(60);
+        expect(listeners()).toBe(0);
+    });
+
+    test("\"frame\" waits for the next animation frame, or 16ms without one", async () => {
+        const calls: number[] = [];
+        const draw = debounce((n: number) => void calls.push(n), "frame");
+        draw(1);
+        draw(2);
+        expect(calls).toEqual([]);
+        await wait(80);
+        expect(calls).toEqual([2]);
+    });
+
+    test("\"frame\" on a hidden page waits 16ms instead of a frame that won't come", async () => {
+        const globals = globalThis as { requestAnimationFrame?: unknown; document?: unknown; };
+        const saved = { raf: globals.requestAnimationFrame, document: globals.document };
+        let frames = 0;
+        globals.requestAnimationFrame = () => ++frames;
+        globals.document = { hidden: true };
+        try {
+            const calls: number[] = [];
+            debounce((n: number) => void calls.push(n), "frame")(1);
+            await wait(80);
+            expect(calls).toEqual([1]);
+            expect(frames).toBe(0);
+        } finally {
+            globals.requestAnimationFrame = saved.raf;
+            globals.document = saved.document;
+        }
+    });
+
+    test("\"frame\" asked for just before the page hides waits 16ms instead, and leaves no visibility listener", async () => {
+        const globals = globalThis as { requestAnimationFrame?: unknown; cancelAnimationFrame?: unknown; document?: unknown; };
+        const saved = { raf: globals.requestAnimationFrame, caf: globals.cancelAnimationFrame, document: globals.document };
+        const frames = new Map<number, () => void>();
+        let next = 0;
+        globals.requestAnimationFrame = (run: () => void) => {
+            frames.set(++next, run);
+            return next;
+        };
+        globals.cancelAnimationFrame = (id: number) => void frames.delete(id);
+        const listeners = new Set<() => void>();
+        const doc = {
+            hidden: false,
+            addEventListener: (type: string, fn: () => void) => void (type === "visibilitychange" && listeners.add(fn)),
+            removeEventListener: (type: string, fn: () => void) => void (type === "visibilitychange" && listeners.delete(fn)),
+            dispatchEvent: () => void [...listeners].forEach(fn => fn()),
+        };
+        globals.document = doc;
+        try {
+            const calls: number[] = [];
+            const draw = debounce((n: number) => void calls.push(n), "frame");
+            draw(1);
+            expect(frames.size).toBe(1);
+            expect(listeners.size).toBe(1);
+            // The page hides: the frame won't come, so the call moves to a 16ms timer
+            doc.hidden = true;
+            doc.dispatchEvent();
+            expect(frames.size).toBe(0);
+            expect(listeners.size).toBe(0);
+            await wait(80);
+            expect(calls).toEqual([1]);
+
+            // A frame that comes removes the listener, and so does a cancel
+            doc.hidden = false;
+            draw(2);
+            expect(listeners.size).toBe(1);
+            [...frames.values()][0]!();
+            expect(calls).toEqual([1, 2]);
+            expect(listeners.size).toBe(0);
+            draw(3);
+            draw.cancel();
+            expect(listeners.size).toBe(0);
+            expect(frames.size).toBe(0);
+            await wait(40);
+            expect(calls).toEqual([1, 2]);
+        } finally {
+            globals.requestAnimationFrame = saved.raf;
+            globals.cancelAnimationFrame = saved.caf;
+            globals.document = saved.document;
+        }
+    });
+
+    test("delay must be \"frame\" or a number from 0 to setTimeout's limit", () => {
+        for (const delay of [NaN, "soon"]) expect(() => debounce(() => { }, delay as never)).toThrow(TypeError);
+        for (const delay of [-1, Infinity, 3e9]) expect(() => debounce(() => { }, delay)).toThrow(RangeError);
+        expect(() => debounce(() => { }, "soon" as never)).toThrow("debounce: delay must be \"frame\" or a number, got \"soon\"");
+    });
+});
+
+describe("timer limits", () => {
+    test("a delay over 2^31-1 ms, which setTimeout would run at once, is a RangeError", async () => {
+        expect(MAX_TIMEOUT_MS).toBe(2 ** 31 - 1);
+        await expect(sleep(3e9)).rejects.toThrow(RangeError);
+        await expect(sleep(3e9)).rejects.toThrow(`sleep: ms must be a finite number from 0 to ${MAX_TIMEOUT_MS}, got 3000000000`);
+        await expect(withTimeout(new Promise(() => { }), 3e9)).rejects.toThrow(RangeError);
+        await expect(until(() => false, { timeout: 3e9 })).rejects.toThrow(RangeError);
+        await expect(until(() => false, { timeout: 10, every: 3e9 })).rejects.toThrow(RangeError);
+        expect(() => backoff({ maxMs: 3e9 })).toThrow(RangeError);
+        await expect(fetchWithTimeout("https://example.com", { timeout: 3e9, fetch: async () => new Response() })).rejects.toThrow(RangeError);
+        await expect(sleep(-1)).rejects.toThrow(RangeError);
+        await expect(sleep(NaN)).rejects.toThrow(TypeError);
+    });
+});
+
+describe("withTimeout", () => {
+    test("settles as the work does when it is in time", async () => {
+        expect(await withTimeout(Promise.resolve(3), 50)).toBe(3);
+        await expect(withTimeout(Promise.reject(new Error("broke")), 50)).rejects.toThrow("broke");
+        await expect(withTimeout(() => { throw new Error("sync"); }, 50)).rejects.toThrow("sync");
+    });
+
+    test("rejects with a TimeoutError and aborts the signal it gave the work", async () => {
+        let inner: AbortSignal | undefined;
+        const err = await withTimeout(signal => (inner = signal, new Promise<never>(() => { })), 5).catch((e: DOMException) => e);
+        expect(err).toBeInstanceOf(DOMException);
+        expect(err.name).toBe("TimeoutError");
+        expect(inner!.aborted).toBe(true);
+    });
+
+    test("rejects with the outer signal's reason when it aborts first, or at once when it already has", async () => {
+        const controller = new AbortController();
+        const pending = withTimeout(new Promise(() => { }), 1000, controller.signal);
+        controller.abort(new Error("left"));
+        await expect(pending).rejects.toThrow("left");
+        await expect(withTimeout(Promise.resolve(1), 1000, AbortSignal.abort())).rejects.toMatchObject({ name: "AbortError" });
+    });
+
+    test("takes the signal bare or as { signal }", async () => {
+        await expect(withTimeout(Promise.resolve(1), 1000, { signal: AbortSignal.abort(new Error("wrapped")) })).rejects.toThrow("wrapped");
+        expect(await withTimeout(Promise.resolve(2), 1000, {})).toBe(2);
+    });
+
+    test("removes its abort listener once settled", async () => {
+        const controller = new AbortController();
+        const listeners = countListeners(controller.signal);
+        await withTimeout(Promise.resolve(1), 1000, controller.signal);
+        await withTimeout(new Promise(() => { }), 1, controller.signal).catch(() => { });
+        expect(listeners()).toBe(0);
+    });
+
+    test("ms must be a number from 0", async () => {
+        await expect(withTimeout(Promise.resolve(1), NaN)).rejects.toThrow(TypeError);
+        for (const ms of [-1, Infinity]) await expect(withTimeout(Promise.resolve(1), ms)).rejects.toThrow(RangeError);
+    });
+});
+
+describe("until", () => {
+    test("resolves true once the check passes, checking every `every` ms", async () => {
+        let n = 0;
+        expect(await until(() => ++n === 3, { timeout: 1000, every: 2 })).toBe(true);
+        expect(n).toBe(3);
+        expect(await until(async () => true, { timeout: 0 })).toBe(true);
+    });
+
+    test("resolves false when the timeout passes, even with a check still running", async () => {
+        expect(await until(() => false, { timeout: 30, every: 2 })).toBe(false);
+        expect(await until(() => new Promise<boolean>(() => { }), { timeout: 20 })).toBe(false);
+    });
+
+    test("rejects when the signal aborts, even with a TimeoutError as its reason", async () => {
+        const controller = new AbortController();
+        const pending = until(() => false, { timeout: 1000, signal: controller.signal });
+        controller.abort();
+        await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        await expect(until(() => false, { timeout: 1000, signal: AbortSignal.abort(new DOMException("late", "TimeoutError")) })).rejects.toMatchObject({ name: "TimeoutError" });
+    });
+
+    test("a check that throws rejects with its error, a TimeoutError of its own included", async () => {
+        await expect(until(() => { throw new Error("bad check"); }, { timeout: 100 })).rejects.toThrow("bad check");
+        const own = new DOMException("the check's request timed out", "TimeoutError");
+        await expect(until(() => { throw own; }, { timeout: 1000 })).rejects.toBe(own);
+    });
+
+    test("without a timeout, waits until the check passes or the signal aborts", async () => {
+        let n = 0;
+        expect(await until(() => ++n === 3, { every: 2, signal: new AbortController().signal })).toBe(true);
+        const controller = new AbortController();
+        const pending = until(() => new Promise<boolean>(() => { }), { signal: controller.signal });
+        controller.abort(new Error("done waiting"));
+        await expect(pending).rejects.toThrow("done waiting");
+    });
+
+    test("takes timeout, signal or both, and checks their values", async () => {
+        await expect(until(() => true)).rejects.toThrow("until: pass timeout, signal or both");
+        await expect(until(() => true, { every: 5 })).rejects.toThrow(TypeError);
+        await expect(until(() => true, { timeout: -1 })).rejects.toThrow(RangeError);
+        await expect(until(() => true, { timeout: 10, every: 0 })).rejects.toThrow("until: every must be a finite number above 0");
+    });
+});
+
+test("isSnowflake takes strings of 1 to 20 digits only", () => {
+    for (const id of ["1", "123456789012345678", "12345678901234567890"]) expect(isSnowflake(id)).toBe(true);
+    for (const id of ["", "123456789012345678901", "12a", " 1", 123, null, undefined]) expect(isSnowflake(id)).toBe(false);
+});
+
+test("fetchWithTimeout and fetchJson send through a fetch passed in, with the URL as a string and the timeout's signal", async () => {
+    const sent: { url: string; signal: AbortSignal | null | undefined; }[] = [];
+    const send = async (url: string, init: RequestInit) => {
+        sent.push({ url, signal: init.signal });
+        return new Response(JSON.stringify({ ok: 1 }), { status: url.endsWith("missing") ? 404 : 200 });
+    };
+    expect(await fetchJson(new URL("https://example.com/a"), { fetch: send })).toEqual({ ok: 1 });
+    await expect(fetchJson("https://example.com/missing", { fetch: send })).rejects.toBeInstanceOf(HttpError);
+    expect((await fetchWithTimeout("https://example.com/b", { fetch: send, timeout: 50 })).status).toBe(200);
+    expect(sent.map(s => s.url)).toEqual(["https://example.com/a", "https://example.com/missing", "https://example.com/b"]);
+    expect(sent.every(s => s.signal instanceof AbortSignal)).toBe(true);
+});
+
+describe("internal helpers", () => {
+    test("createLogOnce logs each distinct line and error once, then one notice past the cap", () => {
+        const lines: unknown[][] = [];
+        const log = createLogOnce((...args) => void lines.push(args), "mist.safe", 2);
+        log("a threw", new Error("x"));
+        log("a threw", new Error("x"));
+        log("no error");
+        log("b threw", new Error("y"));
+        log("c threw", new Error("z"));
+        expect(lines).toEqual([
+            ["a threw", new Error("x")],
+            ["no error"],
+            ["mist.safe: 2 distinct errors logged; further errors suppressed"],
+        ]);
+    });
+
+    test("notifyEach keeps calling listeners after one throws", () => {
+        const heard: number[] = [];
+        const errors: unknown[] = [];
+        const broken = () => { throw new Error("broke"); };
+        notifyEach<[number]>([n => void heard.push(n), broken, n => void heard.push(n * 2)], [3], (fn, err) => void errors.push([fn, err]));
+        expect(heard).toEqual([3, 6]);
+        expect(errors).toEqual([[broken, new Error("broke")]]);
+    });
+
+    test("checkNumber throws a TypeError for a non-number and a RangeError out of range", () => {
+        expect(checkNumber("f", "n", 3, { min: 1, max: 5, integer: true })).toBe(3);
+        expect(() => checkNumber("f", "n", "3")).toThrow("f: n must be a number, got \"3\"");
+        expect(() => checkNumber("f", "n", NaN)).toThrow(TypeError);
+        expect(() => checkNumber("f", "n", 0, { min: 0, exclusiveMin: true })).toThrow("f: n must be a finite number above 0, got 0");
+        expect(() => checkNumber("f", "n", Infinity)).toThrow(RangeError);
+        expect(() => checkNumber("f", "n", 6, { max: 5 })).toThrow("f: n must be a finite number up to 5, got 6");
+    });
+
+    test("globalSlot makes the value once, locks it, and refuses an incompatible one", () => {
+        const root = {};
+        const key = Symbol("slot");
+        const valid = (value: unknown): value is { n: number; } => typeof (value as { n?: unknown; })?.n === "number";
+        const first = globalSlot(key, () => ({ n: 1 }), valid, "test slot", root);
+        expect(globalSlot(key, () => ({ n: 2 }), valid, "test slot", root)).toBe(first);
+        expect(() => Object.defineProperty(root, key, { value: { n: 3 } })).toThrow();
+        const taken = { [key]: "something else" };
+        expect(() => globalSlot(key, () => ({ n: 1 }), valid, "test slot", taken)).toThrow("test slot was made by an incompatible copy of mist-api");
     });
 });

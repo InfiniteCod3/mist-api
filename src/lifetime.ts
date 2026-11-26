@@ -6,6 +6,8 @@ import { access, stat } from "node:fs/promises";
 import { delimiter, extname, isAbsolute, join } from "node:path";
 
 import { NativeError } from "./errors.ts";
+import { checkDelay, stoppedError, stoppedMessage } from "./internal.ts";
+import { log } from "./native-log.ts";
 import { atQuit } from "./quit.ts";
 
 export interface LifetimeOptions {
@@ -21,9 +23,9 @@ export interface Lifetime {
     readonly signal: AbortSignal;
     /** node:child_process spawn, with the child killed on stop: SIGTERM, then SIGKILL after killAfterMs */
     spawn(file: string, args?: readonly string[], options?: SpawnOptions): ChildProcess;
-    /** setInterval, cleared on stop. Returns a function that clears it sooner. */
+    /** setInterval, cleared on stop; a throw from `fn` is logged. Returns a function that clears it sooner. */
     interval(fn: () => void, ms: number): () => void;
-    /** setTimeout, cleared on stop. Returns a function that clears it sooner. */
+    /** setTimeout, cleared on stop; a throw from `fn` is logged. Returns a function that clears it sooner. */
     timeout(fn: () => void, ms: number): () => void;
     /** Destroys `win` on stop, unless it was destroyed already. Returns `win`. */
     window<W extends Destroyable>(win: W): W;
@@ -40,6 +42,14 @@ export function killWithEscalation(child: ChildProcess, ms: number) {
     child.once("exit", () => clearTimeout(timer));
 }
 
+/** Node can't start a .cmd or .bat without a shell since its fix for CVE-2024-27980, and fails with a bare EINVAL */
+function refuseBatch(fn: "lifetime.spawn" | "run", file: string, options: { shell?: boolean | string; }) {
+    if (process.platform === "win32" && !options.shell && /\.(?:cmd|bat)$/i.test(file)) {
+        const fix = fn === "run" ? "Run cmd.exe with [\"/d\", \"/s\", \"/c\", file, ...args]." : "Pass { shell: true }.";
+        throw new NativeError("needs-shell", { file }, `${fn}: ${file} is a batch file, which Node starts only through a shell. ${fix}`);
+    }
+}
+
 /**
  * A scope for one run of the native side: what it starts is cleaned up when the run stops, through
  * `ctx.onDispose`, and its child processes are also killed when Discord quits. Make one in `start`.
@@ -48,13 +58,13 @@ export function killWithEscalation(child: ChildProcess, ms: number) {
 export function lifetime(ctx: NativeContext, { killAfterMs = 3000 }: LifetimeOptions = {}): Lifetime {
     const controller = new AbortController();
     const cleanups = new Set<() => void>();
-    /** Evi doesn't stop native sides when Discord quits, so a child would outlive Discord */
+    /** Evi doesn't stop native sides when Discord quits: without this, a child would outlive Discord */
     const children = new Set<() => void>();
     atQuit(ctx, () => {
         for (const kill of children) kill();
     });
-    const live = () => {
-        if (controller.signal.aborted) throw new NativeError("stopped", undefined, `${ctx.pluginId}'s native side stopped`);
+    const live = (fn: keyof Lifetime) => {
+        if (controller.signal.aborted) throw new NativeError("stopped", undefined, `lifetime.${fn}: ${stoppedMessage(ctx.pluginId)}`);
     };
     const track = (cleanup: () => void) => {
         cleanups.add(cleanup);
@@ -62,19 +72,32 @@ export function lifetime(ctx: NativeContext, { killAfterMs = 3000 }: LifetimeOpt
             if (cleanups.delete(cleanup)) cleanup();
         };
     };
+    /** A timer callback that throws would otherwise be an uncaught exception in Discord's main process */
+    const guarded = (fn: () => void, kind: string) => () => {
+        try {
+            fn();
+        } catch (err) {
+            log.error(`A lifetime ${kind} threw:`, err);
+        }
+    };
 
     ctx.onDispose(() => {
-        controller.abort(new Error(`${ctx.pluginId}'s native side stopped`));
+        controller.abort(stoppedError(ctx.pluginId));
         for (const cleanup of [...cleanups]) {
             cleanups.delete(cleanup);
-            try { cleanup(); } catch { }
+            try {
+                cleanup();
+            } catch (err) {
+                log.error("A lifetime cleanup threw:", err);
+            }
         }
     });
 
     return {
         signal: controller.signal,
         spawn(file, args = [], options = {}) {
-            live();
+            live("spawn");
+            refuseBatch("lifetime.spawn", file, options);
             const child = spawn(file, args, options);
             const stop = () => killWithEscalation(child, killAfterMs);
             const forget = () => {
@@ -89,21 +112,24 @@ export function lifetime(ctx: NativeContext, { killAfterMs = 3000 }: LifetimeOpt
             return child;
         },
         interval(fn, ms) {
-            live();
-            const timer = setInterval(fn, ms);
+            live("interval");
+            checkDelay("lifetime.interval", "ms", ms);
+            const timer = setInterval(guarded(fn, "interval"), ms);
             return track(() => clearInterval(timer));
         },
         timeout(fn, ms) {
-            live();
+            live("timeout");
+            checkDelay("lifetime.timeout", "ms", ms);
+            const call = guarded(fn, "timeout");
             const timer = setTimeout(() => {
                 cleanups.delete(clear);
-                fn();
+                call();
             }, ms);
             const clear = () => clearTimeout(timer);
             return track(clear);
         },
         window(win) {
-            live();
+            live("window");
             track(() => { if (!win.isDestroyed()) win.destroy(); });
             return win;
         },
@@ -141,23 +167,33 @@ export function run(file: string, args: readonly string[] = [], options: RunOpti
     const { timeout = 60_000, signal, cwd, env, input, maxBytes = 10 * 1024 * 1024, killAfterMs = 3000 } = options;
     if (signal?.aborted) return Promise.reject(signal.reason);
     return new Promise((resolve, reject) => {
+        checkDelay("run", "timeout", timeout);
+        refuseBatch("run", file, {});
         const child = spawn(file, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         const out: Buffer[] = [], err: Buffer[] = [];
         const size = { out: 0, err: 0 };
         let failure: unknown;
 
+        let exited = false;
         const fail = (reason: unknown) => {
             if (failure !== undefined) return;
             failure = reason;
-            killWithEscalation(child, killAfterMs);
+            if (exited) abandon();
+            else killWithEscalation(child, killAfterMs);
         };
-        const timer = setTimeout(() => fail(new NativeError("timeout", { file, timeout }, `${file} didn't finish within ${timeout} ms`)), timeout);
+        // The output is dropped after a failure, and a grandchild holding the pipes open would delay "close" for as long as it lives
+        const abandon = () => {
+            done();
+            for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe?.destroy();
+            reject(failure);
+        };
+        const timer = setTimeout(() => fail(new NativeError("timeout", { file, timeout }, `run: ${file} didn't finish within ${timeout} ms`)), timeout);
         const onAbort = () => fail(signal!.reason);
         signal?.addEventListener("abort", onAbort, { once: true });
 
         const collect = (chunks: Buffer[], key: "out" | "err") => (chunk: Buffer) => {
             size[key] += chunk.length;
-            if (size[key] > maxBytes) return fail(new NativeError("too-large", { file, maxBytes }, `${file} wrote more than ${maxBytes} bytes`));
+            if (size[key] > maxBytes) return fail(new NativeError("too-large", { file, maxBytes }, `run: ${file} wrote more than ${maxBytes} bytes`));
             chunks.push(chunk);
         };
         child.stdout!.on("data", collect(out, "out"));
@@ -173,6 +209,10 @@ export function run(file: string, args: readonly string[] = [], options: RunOpti
         child.once("error", error => {
             done();
             reject(failure ?? error);
+        });
+        child.once("exit", () => {
+            exited = true;
+            if (failure !== undefined) abandon();
         });
         child.once("close", (code, exitSignal) => {
             done();
@@ -199,8 +239,10 @@ async function isProgram(path: string) {
 export async function which(name: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
     if (!name) return null;
     const windows = process.platform === "win32";
-    const pathVar = windows ? Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] : env.PATH;
-    const extensions = windows && !extname(name) ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => ext.toLowerCase()) : [""];
+    // Windows' variable names ignore case, and Node's env copy can hold Path or Pathext
+    const read = (key: string) => windows ? Object.entries(env).find(([k]) => k.toUpperCase() === key)?.[1] : env[key];
+    const pathVar = read("PATH");
+    const extensions = windows && !extname(name) ? (read("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => ext.toLowerCase()) : [""];
     const candidates = (base: string) => extensions.map(ext => base + ext);
 
     if (isAbsolute(name) || /[\\/]/.test(name)) {

@@ -1,10 +1,10 @@
 /**
  * What the UI registries share: who owns an entry, how errors are logged once, and the per-page state
- * on globalThis. Patched Discord code reads that state by its Symbol.for key, so the key is the
- * protocol between copies and the patches: change its version when the state's shape changes.
+ * on globalThis. Patched Discord code reads that state by its Symbol.for key. The key is the protocol
+ * between copies and the patches: change its version when the state's shape changes.
  */
+import { createLogOnce, globalSlot, type LogOnce, notifyEach } from "../internal.ts";
 import { need, pluginOf } from "../permissions.ts";
-import { errorMessage } from "../protocol.ts";
 
 /** What mist.log and Evi's ctx.logger both have */
 export interface ErrorLog {
@@ -14,7 +14,7 @@ export interface ErrorLog {
 /** A plugin's mist (createMist's result) */
 export interface MistOwner {
     readonly id: string;
-    /** Throws while the plugin isn't running, so adding UI to a stopped plugin fails loudly */
+    /** Throws while the plugin isn't running: adding UI to a stopped plugin fails loudly */
     readonly ctx: { onDispose(fn: () => void): unknown; };
     readonly log: ErrorLog;
 }
@@ -36,11 +36,11 @@ export interface Owned {
 }
 
 /**
- * The owner of a registry entry: the plugin's own mist object, checked against mist's page registry
- * (pluginOf). With `reads`, the entry hands the plugin message content, so its manifest must declare
- * readMessages, or nothing, as Evi's guard asks of a hook on sending and editing.
+ * The owner of a registry entry: the mist object createMist gave the plugin, checked against mist's
+ * page registry (pluginOf). With `reads`, the entry hands the plugin message content. Its manifest
+ * must then declare readMessages, or nothing, as Evi's guard asks of a hook on sending and editing.
  */
-export function entryOwner(mist: MistOwner, usage: string, reads: boolean): Owned {
+export function entryOwner(mist: MistOwner, usage: string, { reads = false }: { reads?: boolean; } = {}): Owned {
     const id = pluginOf(mist, usage);
     if (reads) need(id, "readMessages", usage);
     return owned(mist);
@@ -54,53 +54,62 @@ export function owned(owner: Owner): Owned {
     return { id: owner.id, log: owner.logger, onDispose: fn => void owner.onDispose(fn) };
 }
 
-const SEEN_MAX = 50;
-const seen = new WeakMap<ErrorLog, Set<string>>();
+const loggers = new WeakMap<ErrorLog, LogOnce>();
 
-/** Logs `line` with `err`, once per log for each of the first 50 distinct line and message pairs */
-export function logOnce(log: ErrorLog, line: string, err: unknown) {
-    let lines = seen.get(log);
-    if (!lines) seen.set(log, lines = new Set());
-    const key = `${line}\n${errorMessage(err)}`;
-    if (lines.has(key) || lines.size >= SEEN_MAX) return;
-    lines.add(key);
-    log.error(line, err);
+/**
+ * Logs `line`, with `err` when given, once per log for each of the first 50 distinct line and message
+ * pairs. The first pair past that logs one notice instead: a quiet log mustn't read as a healthy plugin.
+ */
+export function logOnce(log: ErrorLog, line: string, ...err: [err?: unknown]) {
+    let write = loggers.get(log);
+    if (!write) loggers.set(log, write = createLogOnce((...args) => log.error(...args), "mist-api/ui"));
+    write(line, ...err);
 }
 
-export const UI_PROTOCOL = 1;
+/** Sorts entries by their `<plugin id>/<id>` key: the order doesn't depend on which plugin started first */
+export function byKey(a: { readonly key: string; }, b: { readonly key: string; }): number {
+    if (a.key < b.key) return -1;
+    if (a.key > b.key) return 1;
+    return 0;
+}
+
+/**
+ * Numbers objects in the order first asked about. Made inside a state's `make`: every copy of
+ * mist-api numbers through the first copy's function, and two copies never hand out the same number.
+ */
+export function instanceIds(): (instance: object) => number {
+    const ids = new WeakMap<object, number>();
+    let last = 0;
+    return instance => {
+        let id = ids.get(instance);
+        if (id === undefined) ids.set(instance, id = ++last);
+        return id;
+    };
+}
+
+const UI_PROTOCOL = 1;
 
 /** The key patched code reads: `mist-api.ui/<name>@<protocol>` */
-export const uiKey = (name: string) => `mist-api.ui/${name}@${UI_PROTOCOL}`;
+const uiKey = (name: string) => `mist-api.ui/${name}@${UI_PROTOCOL}`;
 
 /** The expression patched Discord code uses to reach the state under `uiKey(name)` */
 export const uiRef = (name: string) => `globalThis[Symbol.for(${JSON.stringify(uiKey(name))})]`;
 
 /**
  * The page's state under `uiKey(name)`, made by the first copy that asks. The first copy's functions
- * serve every copy until Discord reloads, so they only read the state, never the copy's own variables.
+ * serve every copy until Discord reloads. They read only the state, never variables of the copy that
+ * made them. The key carries the version, and `valid` checks only the shape. Each state still sets
+ * `protocol: 1`, because mist-api 0.4.0 refuses a state without it.
  */
-export function shared<T extends { readonly protocol: number; }>(name: string, make: () => T, valid: (state: T) => boolean): T {
-    const key = Symbol.for(uiKey(name));
-    const target = globalThis as unknown as Record<symbol, T | undefined>;
-    const existing = target[key];
-    if (existing) {
-        if (existing.protocol !== UI_PROTOCOL || !valid(existing)) throw new Error(`mist ui: ${uiKey(name)} was made by an incompatible copy`);
-        return existing;
-    }
-    const created = make();
-    Object.defineProperty(target, key, { value: created, configurable: false, enumerable: false, writable: false });
-    return created;
+export function uiState<T extends object>(name: string, make: () => T, valid: (state: T) => boolean): T {
+    const key = uiKey(name);
+    const isState = (value: unknown): value is T => typeof value === "object" && value !== null && valid(value as T);
+    return globalSlot(Symbol.for(key), make, isState, `The UI state ${key}`);
 }
 
-/** Calls each listener; one throwing doesn't stop the others */
-export function notify(listeners: Set<() => void>) {
-    for (const listener of [...listeners]) {
-        try {
-            listener();
-        } catch (err) {
-            console.error("mist ui: a listener threw", err);
-        }
-    }
+/** Calls each listener. One that throws is logged under `fn` and doesn't keep the others from hearing. */
+export function notify(fn: string, listeners: Set<() => void>) {
+    notifyEach(listeners, [], (_, err) => console.error(`${fn}: a listener threw`, err));
 }
 
 /**
@@ -111,7 +120,7 @@ export function notify(listeners: Set<() => void>) {
  */
 export function insertOnce(marker: string, code: (match: string, groups: string[]) => string) {
     return (match: string, ...rest: unknown[]) => {
-        // No named groups in these patches, so the module's code is the last argument
+        // No named groups in these patches: the module's code is the last argument
         const module = rest[rest.length - 1] as string;
         if (module.includes(marker)) return `${match}/*${marker}*/`;
         return code(match, rest.slice(0, -2) as string[]);

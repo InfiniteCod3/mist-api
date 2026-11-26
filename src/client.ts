@@ -6,9 +6,8 @@
 import type { PluginContext } from "@evi/api";
 
 import { fromWire, isCallAnswer } from "./errors.ts";
-import { type CallMark, HIDDEN, type HiddenMethod, type WireError } from "./protocol.ts";
-
-type Method = (...args: any[]) => unknown;
+import { begin, lacksNative, type Method } from "./internal.ts";
+import { type CallMark, HIDDEN, type HiddenMethod, isHidden, type WireError } from "./protocol.ts";
 
 export interface CallOptions {
     /**
@@ -58,40 +57,33 @@ function abortable<T>(pending: Promise<T>, signal: AbortSignal, onAbort: () => v
     });
 }
 
-/** Evi's errors for a plugin without a native module, and for a module without the method (Electron prefixes the second) */
-const lacksProtocol = (err: unknown) => /has no native (?:module|method)\b/.test(err instanceof Error ? err.message : String(err));
-
 export function createNativeClient(source: ClientSource) {
-    const protocols = new WeakMap<object, Promise<number>>();
+    const protocols = new WeakMap<object, Promise<number | undefined>>();
 
     /**
-     * The native side's CALL_PROTOCOL, or 0 without one. A definite answer is kept for the run; a
-     * failure that says nothing about the module (a busy main, a native side mid-restart) is asked again
-     * on the next call, which meanwhile goes out as Evi passes it.
+     * The native side's CALL_PROTOCOL, 0 when it definitely has none, or undefined when asking failed
+     * for a reason that says nothing about the module (a busy main, a native side mid-restart). A
+     * definite answer is kept for the run; an undefined one is asked again on the next call.
      */
-    function protocol(context: PluginContext<any>): Promise<number> {
-        let known = protocols.get(context);
-        if (!known) {
-            let asked: Promise<unknown>;
-            try {
-                asked = context.native.call(HIDDEN.protocol);
-            } catch (err) {
-                // Evi throws synchronously for a plugin without a native module, and the real call will too
-                asked = Promise.reject(err);
-            }
-            const answer = known = asked.then(value => typeof value === "number" ? value : 0, err => {
-                if (!lacksProtocol(err) && protocols.get(context) === answer) protocols.delete(context);
-                return 0;
-            });
-            protocols.set(context, answer);
-        }
-        return known;
+    function protocol(context: PluginContext<any>): Promise<number | undefined> {
+        const known = protocols.get(context);
+        if (known) return known;
+        const answer: Promise<number | undefined> = begin(() => context.native.call(HIDDEN.protocol)).then(
+            value => typeof value === "number" ? value : 0,
+            err => {
+                if (lacksNative(err)) return 0;
+                if (protocols.get(context) === answer) protocols.delete(context);
+                return undefined;
+            },
+        );
+        protocols.set(context, answer);
+        return answer;
     }
 
     async function send(method: string, args: unknown[], signal: AbortSignal | undefined): Promise<unknown> {
         const context = source.context();
         signal?.throwIfAborted();
-        const version = method.startsWith("__mist_") ? 0 : await protocol(context);
+        const version = isHidden(method) ? 0 : await protocol(context) ?? 0;
         signal?.throwIfAborted();
         if (version < 1) {
             const pending = context.native.call(method, ...args);

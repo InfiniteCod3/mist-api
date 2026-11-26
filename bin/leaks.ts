@@ -1,10 +1,11 @@
 /**
  * mist leaks: turns a dev build off and on, counting what the page holds after each stop and each
- * start. A count that grows with every cycle is what a stop left behind. This changes the plugin's
- * switch, so it runs only on dev builds that stay in Discord's page, and leaves the plugin on.
+ * start. A count that grows with every cycle is what a stop left behind. It changes the plugin's
+ * switch: it runs only on dev builds that stay in Discord's page, and leaves the plugin on.
  */
-import { CdpError, evaluate, type Send } from "./cdp.ts";
-import { pageExpression } from "./page.ts";
+import { CliError, evaluate, type Send, sleep } from "./cdp.ts";
+import { errorText } from "./format.ts";
+import { type PageGlobal, pageCall } from "./page.ts";
 
 export interface Counts {
     /** Elements in the document */
@@ -17,29 +18,35 @@ export interface Counts {
     /** Event listeners on the page, from CDP's Performance.getMetrics (JSEventListeners) */
     listeners: number | null;
 }
-export const COUNTS: (keyof Counts)[] = ["nodes", "styles", "subscribers", "interceptors", "listeners"];
+const COUNTS: (keyof Counts)[] = ["nodes", "styles", "subscribers", "interceptors", "listeners"];
 export interface Cycle { off: Counts; on: Counts; }
 export interface LeakReport { plugin: string; before: Counts; cycles: Cycle[]; growth: Partial<Record<keyof Counts, number>>; }
 
-interface Target { source: string; running: boolean; native: boolean; switches: boolean; }
+interface LeakTarget { source: string; running: boolean; native: boolean; switches: boolean; }
 
-function plugin(id: string): Target | null {
-    const s = (globalThis as any).Evi?.plugins?.get(id);
-    return s ? { source: s.source, running: s.running, native: !!s.manifest?.native, switches: Object.keys(s.manifest?.chromiumSwitches ?? {}).length > 0 } : null;
+interface PluginSnapshot { source: string; running: boolean; manifest?: { native?: string; chromiumSwitches?: Record<string, string>; }; }
+type LeaksPage = PageGlobal<{ Evi?: { plugins?: { get(id: string): PluginSnapshot | undefined; }; api?: { Dispatcher?: { _subscriptions?: Record<string, Set<unknown>>; _interceptors?: unknown[]; }; }; }; }>;
+
+function plugin(id: string): LeakTarget | null {
+    const snapshot = (globalThis as LeaksPage).Evi?.plugins?.get(id);
+    if (!snapshot) return null;
+    const switches = Object.keys(snapshot.manifest?.chromiumSwitches ?? {}).length > 0;
+    return { source: snapshot.source, running: snapshot.running, native: !!snapshot.manifest?.native, switches };
 }
 
 function measure(): Omit<Counts, "listeners"> {
-    const D = (globalThis as any).Evi?.api?.Dispatcher;
+    const dispatcher = (globalThis as LeaksPage).Evi?.api?.Dispatcher;
     const doc = typeof document === "undefined" ? null : document;
     let subscribers: number | null = null;
     try {
-        subscribers = Object.values(D._subscriptions as Record<string, Set<unknown>>).reduce((n, set) => n + set.size, 0);
+        const subscriptions = dispatcher?._subscriptions;
+        if (subscriptions) subscribers = Object.values(subscriptions).reduce((n, set) => n + set.size, 0);
     } catch { }
     return {
         nodes: doc ? doc.getElementsByTagName("*").length : null,
         styles: doc ? doc.querySelectorAll("style, link[rel=stylesheet]").length + (doc.adoptedStyleSheets?.length ?? 0) : null,
         subscribers,
-        interceptors: Array.isArray(D?._interceptors) ? D._interceptors.length : null,
+        interceptors: Array.isArray(dispatcher?._interceptors) ? dispatcher._interceptors.length : null,
     };
 }
 
@@ -56,36 +63,35 @@ export interface LeakOptions {
 
 /** Refuses anything but a running dev build that stays in Discord's page, before it changes anything */
 export async function checkLeakTarget(send: Send, id: string): Promise<void> {
-    const found = await evaluate<Target | null>(send, pageExpression(plugin, [id]));
-    if (!found) throw new CdpError(`${id} isn't installed`);
-    if (found.source !== "dev") throw new CdpError(`mist leaks turns plugins off and on, so it runs only on dev builds, and ${id} is a ${found.source} install`);
+    const found = await pageCall(send, plugin, [id]);
+    if (!found) throw new CliError(`${id} isn't installed`);
+    if (found.source !== "dev") throw new CliError(`mist leaks runs only on dev builds: ${id} is a ${found.source} install`);
     // src/main/plugins.ts askToEnable: main asks the user before each turn-on of such a plugin
-    if (found.native || found.switches) throw new CdpError(`${id} has ${found.native ? "a native side" : "Chromium switches"}, so Evi shows a yes or no dialog each time it is turned on: mist leaks can't turn it on again by itself`);
-    if (!found.running) throw new CdpError(`${id} isn't running: turn it on first, so mist leaks can leave it as it was`);
+    if (found.native || found.switches) throw new CliError(`mist leaks can't turn ${id} on again by itself: it has ${found.native ? "a native side" : "Chromium switches"}, and Evi asks yes or no each time it is turned on`);
+    if (!found.running) throw new CliError(`${id} isn't running: turn it on first, and mist leaks leaves it on`);
 }
 
 export async function findLeaks(send: Send, id: string, options: LeakOptions): Promise<LeakReport> {
     const { cycles, settleMs = 1500, startMs = 10_000, stopped = () => false } = options;
     await checkLeakTarget(send, id);
-    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     const step = () => {
-        if (stopped()) throw new CdpError(`mist leaks stopped at Ctrl+C. ${id} is on.`);
+        if (stopped()) throw new CliError(`mist leaks stopped at Ctrl+C. ${id} is on.`);
     };
     const listeners = async (): Promise<number | null> => {
         try {
             const { metrics } = await send("Performance.getMetrics");
-            return metrics.find((m: { name: string; }) => m.name === "JSEventListeners")?.value ?? null;
+            return metrics.find((metric: { name: string; }) => metric.name === "JSEventListeners")?.value ?? null;
         } catch {
             return null;
         }
     };
-    const count = async (): Promise<Counts> => ({ ...await evaluate<Omit<Counts, "listeners">>(send, pageExpression(measure, [])), listeners: await listeners() });
+    const count = async (): Promise<Counts> => ({ ...await pageCall(send, measure, []), listeners: await listeners() });
     const setEnabled = (on: boolean) => evaluate(send, `Evi.plugins.setEnabled(${JSON.stringify(id)}, ${on})`);
 
     await send("Performance.enable").catch(() => { });
     let turnedOff = false;
     try {
-        await wait(settleMs);
+        await sleep(settleMs);
         step();
         const before = await count();
         const done: Cycle[] = [];
@@ -94,17 +100,17 @@ export async function findLeaks(send: Send, id: string, options: LeakOptions): P
             // Before the call: a turn-off that fails or times out may still have turned it off
             turnedOff = true;
             await setEnabled(false);
-            await wait(settleMs);
+            await sleep(settleMs);
             step();
             const off = await count();
             await setEnabled(true);
             turnedOff = false;
             const until = Date.now() + startMs;
-            while (!(await evaluate<Target | null>(send, pageExpression(plugin, [id])))?.running) {
-                if (Date.now() > until) throw new CdpError(`${id} didn't start again within ${startMs / 1000} s: mist errors ${id} shows why`);
-                await wait(100);
+            while (!(await pageCall(send, plugin, [id]))?.running) {
+                if (Date.now() > until) throw new CliError(`${id} didn't start again within ${startMs / 1000} s: mist errors ${id} shows why`);
+                await sleep(100);
             }
-            await wait(settleMs);
+            await sleep(settleMs);
             step();
             const cycle = { off, on: await count() };
             done.push(cycle);
@@ -112,36 +118,40 @@ export async function findLeaks(send: Send, id: string, options: LeakOptions): P
         }
         return { plugin: id, before, cycles: done, growth: growth(before, done) };
     } finally {
-        const turnOnError = turnedOff ? await setEnabled(true).then(() => null, (err: Error) => err.message) : null;
+        const turnOnError = turnedOff ? await setEnabled(true).then(() => null, errorText) : null;
         await send("Performance.disable").catch(() => { });
-        if (turnOnError !== null) throw new CdpError(`${id} may be off: turning it on again failed (${turnOnError}). Turn it on in Evi's settings.`);
+        if (turnOnError !== null) throw new CliError(`${id} may be off: turning it on again failed (${turnOnError}). Turn it on in Evi's settings.`);
     }
 }
 
 /**
  * How much each count rose per cycle, for counts that rose after every start and after every stop.
- * Discord changes the page on its own too, so one cycle's rise alone isn't counted.
+ * Discord changes the page by itself too: one cycle's rise alone isn't counted.
  */
 export function growth(before: Counts, cycles: Cycle[]): Partial<Record<keyof Counts, number>> {
     const out: Partial<Record<keyof Counts, number>> = {};
     for (const key of COUNTS) {
-        const on = [before[key], ...cycles.map(c => c.on[key])];
-        const off = cycles.map(c => c.off[key]);
-        if (on.some(v => v === null) || off.some(v => v === null)) continue;
-        const rising = (list: (number | null)[]) => list.every((v, i) => i === 0 || v! > list[i - 1]!);
+        const on = [before[key], ...cycles.map(cycle => cycle.on[key])];
+        const off = cycles.map(cycle => cycle.off[key]);
+        if (on.some(count => count === null) || off.some(count => count === null)) continue;
+        const rising = (list: (number | null)[]) => list.every((count, i) => i === 0 || count! > list[i - 1]!);
         if (cycles.length >= 2 && rising(on) && rising(off)) out[key] = (on[on.length - 1]! - on[0]!) / cycles.length;
     }
     return out;
 }
 
-export function leakLines(r: LeakReport): string[] {
-    const shown = COUNTS.filter(k => r.before[k] !== null);
-    const row = (label: string, c: Counts) => `  ${label.padEnd(12)} ${shown.map(k => `${k} ${c[k]! - r.before[k]! >= 0 ? "+" : ""}${c[k]! - r.before[k]!}`).join("  ")}`;
-    const out = [`${r.plugin}: ${r.cycles.length} off and on cycles, counts against before the first (${shown.map(k => `${k} ${r.before[k]}`).join(", ")})`];
-    r.cycles.forEach((c, i) => out.push(row(`${i + 1} off`, c.off), row(`${i + 1} on`, c.on)));
-    const grew = Object.entries(r.growth);
-    if (r.cycles.length < 2) out.push("One cycle can't tell a leak from Discord changing the page: use --cycles 3 or more.");
+export function leakLines(report: LeakReport): string[] {
+    const shown = COUNTS.filter(key => report.before[key] !== null);
+    const change = (counts: Counts, key: keyof Counts) => {
+        const diff = counts[key]! - report.before[key]!;
+        return `${key} ${diff >= 0 ? "+" : ""}${diff}`;
+    };
+    const row = (label: string, counts: Counts) => `  ${label.padEnd(12)} ${shown.map(key => change(counts, key)).join("  ")}`;
+    const out = [`${report.plugin}: ${report.cycles.length} off and on cycles, counts against before the first (${shown.map(key => `${key} ${report.before[key]}`).join(", ")})`];
+    report.cycles.forEach((cycle, i) => out.push(row(`${i + 1} off`, cycle.off), row(`${i + 1} on`, cycle.on)));
+    const grew = Object.entries(report.growth);
+    if (report.cycles.length < 2) out.push("One cycle can't tell a leak from Discord changing the page: use --cycles 3 or more.");
     else if (!grew.length) out.push("Nothing grew with every cycle.");
-    else for (const [key, per] of grew) out.push(`LEAK? ${key} grew after every stop and every start, about ${Math.round(per! * 10) / 10} per cycle`);
+    else for (const [key, perCycle] of grew) out.push(`LEAK? ${key} grew after every stop and every start, about ${Math.round(perCycle! * 10) / 10} per cycle`);
     return out;
 }

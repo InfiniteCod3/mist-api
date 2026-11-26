@@ -2,17 +2,11 @@ import { filters, find, React, type SourcePatch } from "@evi/api";
 import type { ComponentType, MouseEvent, ReactElement, ReactNode } from "react";
 
 import { onDemand } from "../patches.ts";
-import type { Channel, User } from "../stores.ts";
+import type { Channel, Message } from "../stores.ts";
 import { Boundary, type Fallback } from "./boundary.ts";
-import { entryOwner, insertOnce, type MistOwner, notify, type Owned, shared, uiRef } from "./shared.ts";
+import { byKey, entryOwner, insertOnce, instanceIds, type MistOwner, notify, type Owned, uiRef, uiState } from "./shared.ts";
 
-/** A Discord message, typed only as far as UI entries use it */
-export interface Message {
-    id: string;
-    channel_id: string;
-    content: string;
-    author: User;
-}
+export type { Message } from "../stores.ts";
 
 interface Entry<P extends object> {
     /** `<plugin id>/<entry id>`: entries render in this order, whatever order plugins start in */
@@ -26,27 +20,32 @@ interface ListState<P extends object> {
     readonly protocol: 1;
     readonly entries: Map<string, Entry<P>>;
     readonly listeners: Set<() => void>;
-    /** The entries sorted by key, a new array on each change */
+    /** A new array on each change, for useSyncExternalStore */
     list: readonly Entry<P>[];
 }
 
 export interface EntryOptions {
-    /** Shown if the entry throws while rendering. Defaults to nothing for buttons and to Boundary's notice for accessories. */
+    /**
+     * Shown if the entry throws while rendering. Leaving it out, or undefined, shows nothing for a
+     * button, where a notice wouldn't fit, and Boundary's notice for an accessory.
+     */
     fallback?: Fallback;
 }
 
 function listState<P extends object, F extends object>(name: string, calls: (render: (props: P) => ReactElement) => F) {
-    return shared<ListState<P> & F>(name, () => {
+    return uiState<ListState<P> & F>(name, () => {
         const state: ListState<P> = { protocol: 1, entries: new Map(), listeners: new Set(), list: [] };
         const listen = (listener: () => void) => {
             state.listeners.add(listener);
             return () => void state.listeners.delete(listener);
         };
         const read = () => state.list;
+        const idOf = instanceIds();
         function MistEntries({ props }: { props: P; }) {
             const list = React.useSyncExternalStore(listen, read);
+            // Keyed per add: an entry a reload added again under its id starts with a fresh boundary
             return React.createElement(React.Fragment, null, ...list.map(entry =>
-                React.createElement(Boundary, { key: entry.key, name: entry.key, mist: entry.owner, fallback: entry.fallback },
+                React.createElement(Boundary, { key: `${entry.key}#${idOf(entry)}`, name: entry.key, mist: entry.owner, fallback: entry.fallback },
                     React.createElement(entry.Component, props))));
         }
         MistEntries.displayName = `MistEntries(${name})`;
@@ -55,28 +54,28 @@ function listState<P extends object, F extends object>(name: string, calls: (ren
     }, s => s.entries instanceof Map && s.listeners instanceof Set && Array.isArray(s.list));
 }
 
-function changed(state: ListState<any>) {
-    state.list = [...state.entries.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-    notify(state.listeners);
+function changed<P extends object>(fn: string, state: ListState<P>) {
+    state.list = [...state.entries.values()].sort(byKey);
+    notify(fn, state.listeners);
 }
 
-function addEntry<P extends object>(state: ListState<P>, by: Owned, id: string, Component: ComponentType<P>, fallback: Fallback | undefined) {
-    if (!id) throw new Error("mist ui: an entry needs an id");
+function addEntry<P extends object>(fn: string, state: ListState<P>, by: Owned, id: string, Component: ComponentType<P>, fallback: Fallback | undefined) {
+    if (!id) throw new TypeError(`${fn}: id must be a non-empty string`);
     const entry: Entry<P> = { key: `${by.id}/${id}`, Component, owner: by, fallback };
     state.entries.set(entry.key, entry);
-    changed(state);
-    // Only its own entry: a newer run of the plugin may have replaced it under the same key
+    changed(fn, state);
+    // Removes this entry only: a newer run of the plugin may have replaced it under the same key
     const remove = () => {
         if (state.entries.get(entry.key) !== entry) return;
         state.entries.delete(entry.key);
-        changed(state);
+        changed(fn, state);
     };
     by.onDispose(remove);
     return remove;
 }
 
 /** A lookup of Discord's code, kept once found; a miss is searched again at most every 10 seconds */
-function lookup<T>(search: () => T | undefined): () => T | undefined {
+function throttledLookup<T>(search: () => T | undefined): () => T | undefined {
     let value: T | undefined;
     let missedAt = -Infinity;
     return () => {
@@ -91,7 +90,7 @@ function lookup<T>(search: () => T | undefined): () => T | undefined {
     };
 }
 
-/** What Discord gives its chat bar buttons. `type.analyticsName` is "normal" in a channel's own chat bar. */
+/** What Discord gives its chat bar buttons. `type.analyticsName` is "normal" in a channel's chat bar. */
 export interface ChatBarProps {
     channel: Channel;
     disabled?: boolean;
@@ -103,7 +102,7 @@ const CHAT_BAR = "chat-bar";
 
 const chatBarState = () => listState<ChatBarProps, { inject(buttons: unknown, props: ChatBarProps): void; }>(CHAT_BAR, render => ({
     inject(buttons, props) {
-        // An input without buttons of its own (some special text boxes) stays without
+        // An input that has no buttons (some special text boxes) gets none
         if (!Array.isArray(buttons) || !buttons.length || props?.channel == null) return;
         const submit = buttons.findIndex(button => (button as { key?: unknown; } | null)?.key === "submit");
         buttons.splice(submit < 0 ? buttons.length : submit, 0, render(props));
@@ -114,17 +113,26 @@ export interface ChatBarButtonProps {
     /** For screen readers, and the tooltip where Discord shows one */
     label: string;
     onClick(event: MouseEvent): void;
-    /** Shows the button as on, like Discord's own toggles */
+    /** Shows the button as on, like Discord's toggles */
     active?: boolean;
     /** The icon, about 20 by 20 pixels */
     children: ReactNode;
 }
 
-const chatButton = lookup<ComponentType<any>>(() => find(filters.componentByCode("CHAT_INPUT_BUTTON_NOTIFICATION", "sparkle")));
-/** The wrapper class of Discord's apps button, from its CSS module */
-const chatButtonContainer = lookup(() => Object.values(find(v =>
-    typeof v === "object" && v !== null && Object.values(v).some(c => typeof c === "string" && c.startsWith("channelAppLauncherButtonPopoutIconAnimation_")),
-) ?? {}).find((c): c is string => typeof c === "string" && c.startsWith("buttonContainer_")));
+/** Discord's chat bar button, with the props ChatBarButton gives it */
+type DiscordChatButton = ComponentType<{ onClick(event: MouseEvent): void; isActive: boolean; "aria-label": string; sparkle: boolean; children?: ReactNode; }>;
+
+const chatButton = throttledLookup<DiscordChatButton>(() => find(filters.componentByCode("CHAT_INPUT_BUTTON_NOTIFICATION", "sparkle")));
+
+const classNames = (module: unknown): string[] =>
+    typeof module === "object" && module !== null ? Object.values(module).filter((c): c is string => typeof c === "string") : [];
+
+/** The CSS module that has a class starting with `prefix` */
+const findCssModule = (prefix: string): unknown => find(module => classNames(module).some(c => c.startsWith(prefix)));
+
+/** The wrapper class of Discord's apps button, from the CSS module of its popout icon */
+const chatButtonContainer = throttledLookup(() =>
+    classNames(findCssModule("channelAppLauncherButtonPopoutIconAnimation_")).find(c => c.startsWith("buttonContainer_")));
 
 /** A button that looks like Discord's gift and sticker buttons; a plain button if Discord renamed those */
 export function ChatBarButton({ label, onClick, active = false, children }: ChatBarButtonProps) {
@@ -143,11 +151,11 @@ export function ChatBarButton({ label, onClick, active = false, children }: Chat
 
 export const chatBar = {
     /**
-     * Put these in the plugin's `patches`. Every plugin using the chat bar carries them, and the
-     * buttons show once, from whichever plugins are on.
+     * Put these in the plugin's `patches`. Every plugin using the chat bar carries them. The buttons
+     * show once, from whichever plugins are on.
      */
     patches: [onDemand({
-        // ChannelTextAreaButtons builds its buttons into an array, the send button last (checked 2026-11-05):
+        // ChannelTextAreaButtons builds its buttons into an array, the send button last (checked 2026-11-26):
         //   q&&F&&$.push((0,i.jsx)(b,{channelId:S.id,type:T},"appLauncher")),ee&&$.push((0,i.jsx)(ed,{onClick:N,disabled:g||j},"submit")),0===$.length)?null:…
         // The call goes after that push and leaves both pushes and the length check alone for other patches.
         find: "\"ChannelTextAreaButtons\"",
@@ -161,7 +169,7 @@ export const chatBar = {
      * within the plugin; adding the same id again replaces the button.
      */
     add(mist: MistOwner, id: string, Component: ComponentType<ChatBarProps>, options: EntryOptions = {}): () => void {
-        return addEntry(chatBarState(), entryOwner(mist, "chatBar.add", false), id, Component, "fallback" in options ? options.fallback : null);
+        return addEntry("chatBar.add", chatBarState(), entryOwner(mist, "chatBar.add"), id, Component, options.fallback ?? null);
     },
 };
 
@@ -180,7 +188,7 @@ export interface PopoverButtonProps {
 export interface PopoverProps {
     message: Message;
     channel: Channel;
-    /** Discord's own hover bar button: render it with your label, icon and onClick */
+    /** Discord's hover bar button: render it with your label, icon and onClick */
     Button: ComponentType<PopoverButtonProps>;
 }
 
@@ -193,7 +201,7 @@ const popoverState = () => listState<PopoverProps, { render(Button: PopoverProps
 export const popover = {
     /** Put these in the plugin's `patches` */
     patches: [onDemand({
-        // The hover bar lists the Shift-only buttons first, then the rest (checked 2026-11-05):
+        // The hover bar lists the Shift-only buttons first, then the rest (checked 2026-11-26):
         //   children:[x?(0,a.jsxs)(a.Fragment,{children:[l&&N?(0,a.jsx)(ni.qv,{label:…,icon:tP.L,onClick:e=>(0,t_.DT)(t,n,e)},"copy-id"):null, … ,"reply-self"):null]}):null,h?…
         // The call goes right after the Shift-only group, with the button component, channel and message from the copy-id button.
         find: ",\"copy-id\")",
@@ -204,10 +212,10 @@ export const popover = {
     })] as SourcePatch[],
     /**
      * Adds a button to the hover bar of every message while the plugin runs. Render `props.Button`.
-     * It sees each message, so the plugin's manifest must declare readMessages, or nothing.
+     * It sees each message: the plugin's manifest must declare readMessages, or nothing.
      */
     add(mist: MistOwner, id: string, Component: ComponentType<PopoverProps>, options: EntryOptions = {}): () => void {
-        return addEntry(popoverState(), entryOwner(mist, "popover.add", true), id, Component, "fallback" in options ? options.fallback : null);
+        return addEntry("popover.add", popoverState(), entryOwner(mist, "popover.add", { reads: true }), id, Component, options.fallback ?? null);
     },
 };
 
@@ -225,7 +233,7 @@ const accessoriesState = () => listState<AccessoryProps, { render(props: Accesso
 export const accessories = {
     /** Put these in the plugin's `patches` */
     patches: [onDemand({
-        // The accessories under a message are one array (checked 2026-11-05):
+        // The accessories under a message are one array (checked 2026-11-26):
         //   children:[k,S,v,T,R,d,c,j,u,m,h,b,g,f,E,C,_,a,p,A,x,l&&this.renderSuppressConfirmModal(),r&&this.renderRemoveAttachmentConfirmModal(),I,y,N]
         // The call goes after the confirm dialogs, before the safety notices. `this.props` holds the message and its channel.
         find: "renderSuppressConfirmModal",
@@ -236,9 +244,9 @@ export const accessories = {
     })] as SourcePatch[],
     /**
      * Adds UI under every message while the plugin runs. Return null for messages it isn't for. It
-     * sees each message, so the plugin's manifest must declare readMessages, or nothing.
+     * sees each message: the plugin's manifest must declare readMessages, or nothing.
      */
     add(mist: MistOwner, id: string, Component: ComponentType<AccessoryProps>, options: EntryOptions = {}): () => void {
-        return addEntry(accessoriesState(), entryOwner(mist, "accessories.add", true), id, Component, options.fallback);
+        return addEntry("accessories.add", accessoriesState(), entryOwner(mist, "accessories.add", { reads: true }), id, Component, options.fallback);
     },
 };

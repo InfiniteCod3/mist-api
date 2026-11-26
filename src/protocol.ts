@@ -4,7 +4,13 @@
  */
 import type { Reduced, Snapshot } from "./values.ts";
 
-export const MIST_VERSION = "0.4.0";
+export const MIST_VERSION = "0.5.0";
+
+/** What every name of mist's hidden native methods starts with */
+export const HIDDEN_PREFIX = "__mist_";
+
+/** Whether `name` is one of mist's hidden native methods, which the page client never lists */
+export const isHidden = (name: string) => name.startsWith(HIDDEN_PREFIX);
 
 /** Native methods every defineNative module has; the page client never lists them */
 export const HIDDEN = {
@@ -48,8 +54,6 @@ export type NativeLogs =
     | ReducedNativeLogs;
 /** `quiet` counts the calls of each quiet method, which aren't in `calls` */
 export type ReducedNativeLogs = { full: false; calls: CallRecord<Reduced>[]; logs: LogRecord<Reduced>[]; quiet?: Record<string, number>; };
-
-export const errorMessage = (err: unknown) => err instanceof Error ? err.message : String(err);
 
 /**
  * What `__mist_events` answers. `fresh` means the page has to load its state again before it

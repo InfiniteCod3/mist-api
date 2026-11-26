@@ -68,3 +68,17 @@ test("createMist's quiet counts show in the plugin's state, and name only the na
     // @ts-expect-error quiet names the native side's methods
     createMist<{}, Desk>("t-quiet-typo", { quiet: ["pol"] });
 });
+
+test("an argument or result that can't be copied is recorded as unrecordable, and the call still runs", async () => {
+    const hostile = new Proxy({}, { ownKeys() { throw new Error("no keys for you"); } });
+    for (const keepValues of [true, false]) {
+        const recorder = createRecorder({ keepValues });
+        expect(recorder.track("send", [hostile], () => "sent")).toBe("sent");
+        expect(await recorder.track("load", [], async () => hostile)).toBe(hostile);
+        recorder.log("info", [hostile]);
+        const [send, load] = recorder.calls(undefined, true);
+        expect(send.args).toEqual(["[unrecordable]"]);
+        expect(load.outcome).toMatchObject({ state: "ok", result: "[unrecordable]" });
+        expect(recorder.logs(undefined, true)[0].args).toEqual(["[unrecordable]"]);
+    }
+});

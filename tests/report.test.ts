@@ -41,7 +41,9 @@ test("the report names the versions and the plugin's status, and shows each reco
     expect(report).toMatch(/warn {2}string\(28\) object\(1 keys\)/);
     expect(report).toMatch(/lookup\(object\(1 keys\)\) ok \d+ms -> object\(1 keys\)/);
     expect(report).toContain("Native side's log, last 50:");
-    for (const value of ["Berlin", "hidden-token", "stale", "21"]) expect(report).not.toContain(value);
+    // Without the report's times, whose digits could hold "21"
+    const values = report.replace(/^Made \S+/m, "").replace(/\d\d:\d\d:\d\d\.\d{3}/g, "");
+    for (const value of ["Berlin", "hidden-token", "stale", "21"]) expect(values).not.toContain(value);
 });
 
 test("copyReport copies the report with the Clipboard API and toasts that it did", async () => {

@@ -1,13 +1,14 @@
 /** A plugin's key-value store in the page's IndexedDB, one database per plugin id and per account. */
+import { errorMessage, isThenable, jsonText, shownValue } from "./internal.ts";
 
-/** Keys map to JSON values. Values are stored as JSON text, so JSON.stringify's rules apply on the way in. */
+/** Keys map to JSON values. Values are stored as JSON text: JSON.stringify's rules apply on the way in. */
 export interface KeyValueStore {
     /** The stored value, parsed: validate it before use. undefined when the key isn't set. */
     get(key: string): Promise<unknown>;
     /** Rejects with JSON.stringify's error for a value it can't write, such as a BigInt or a cycle */
     set(key: string, value: unknown): Promise<void>;
     /**
-     * Reads the value, calls `fn` with it and stores what it returns, in one transaction, so two
+     * Reads the value, calls `fn` with it and stores what it returns, in one transaction: two
      * updates of a key never lose each other's write. `fn` must be synchronous. Returning undefined
      * deletes the key; throwing leaves the store as it was and rejects with that error.
      */
@@ -28,7 +29,7 @@ export interface PluginStorage extends KeyValueStore {
 
 const STORE = "kv";
 
-/** The database name: mist's own prefix, so it never opens a plugin's own `evi-<id>` database */
+/** The database name: mist's prefix, which never matches a plugin's `evi-<id>` database */
 export const storageName = (id: string, userId?: string) => userId === undefined ? `mist-api:${id}` : `mist-api:${id}:account:${userId}`;
 
 function factory(name: string): IDBFactory {
@@ -36,19 +37,27 @@ function factory(name: string): IDBFactory {
     try {
         idb = globalThis.indexedDB;
     } catch (err) {
-        throw new Error(`IndexedDB isn't available on this page, so ${name} can't be opened: ${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`IndexedDB isn't available on this page: ${name} can't be opened (${errorMessage(err)})`);
     }
-    if (!idb) throw new Error(`IndexedDB isn't available on this page, so ${name} can't be opened`);
+    if (!idb) throw new Error(`IndexedDB isn't available on this page: ${name} can't be opened`);
     return idb;
 }
 
 function connect(name: string): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
         const request = factory(name).open(name, 1);
+        let blocked = false;
         request.onupgradeneeded = () => void request.result.createObjectStore(STORE);
-        request.onsuccess = () => resolve(request.result);
+        request.onsuccess = () => {
+            // open() already rejected, so nothing else would ever close this connection
+            if (blocked) request.result.close();
+            else resolve(request.result);
+        };
         request.onerror = () => reject(request.error ?? new Error(`Couldn't open ${name}`));
-        request.onblocked = () => reject(new Error(`Opening ${name} is blocked by another connection to it that won't close`));
+        request.onblocked = () => {
+            blocked = true;
+            reject(new Error(`Opening ${name} is blocked by another connection to it that won't close`));
+        };
     });
 }
 
@@ -109,7 +118,7 @@ function store(name: string): KeyValueStore {
         }),
         async set(key, value) {
             // Before the transaction, so a value JSON can't write rejects without opening anything
-            const json = text(value);
+            const json = jsonText("storage.set", value);
             return transact<void>("readwrite", kv => void kv.put(json, key));
         },
         update: (key, fn) => transact("readwrite", (kv, done, fail) => {
@@ -117,17 +126,17 @@ function store(name: string): KeyValueStore {
             request.onsuccess = () => {
                 try {
                     const next = fn(parse(request.result));
-                    // The transaction would commit before the promise settled, storing it as {}. Its own
-                    // rejection is dropped: the TypeError is what update rejects with.
-                    if (typeof (next as { then?: unknown; } | null)?.then === "function") {
+                    // The transaction would commit before the promise settled, storing it as {}. The
+                    // promise's rejection is dropped: the TypeError is what update rejects with.
+                    if (isThenable(next)) {
                         Promise.resolve(next).catch(() => { });
-                        throw new TypeError(`update's function must be synchronous: it returned a promise for ${JSON.stringify(key)}, so nothing was stored`);
+                        throw new TypeError(`storage.update: fn must be synchronous; it returned a promise for ${shownValue(key)} and nothing was stored`);
                     }
                     if (next === undefined) {
                         kv.delete(key);
                         return done(undefined);
                     }
-                    const json = text(next);
+                    const json = jsonText("storage.update", next);
                     kv.put(json, key);
                     done(JSON.parse(json));
                 } catch (err) {
@@ -146,18 +155,12 @@ function store(name: string): KeyValueStore {
 
 const parse = (stored: unknown) => stored === undefined ? undefined : JSON.parse(stored as string);
 
-function text(value: unknown): string {
-    const json = JSON.stringify(value);
-    if (json === undefined) throw new TypeError(`Can't store ${typeof value} as JSON`);
-    return json;
-}
-
 export function createStorage(id: string): PluginStorage {
     const accounts = new Map<string, KeyValueStore>();
     return {
         ...store(storageName(id)),
         account(userId) {
-            if (typeof userId !== "string" || !userId) throw new TypeError(`storage.account needs the account's user id, got ${JSON.stringify(userId)}: no account is signed in yet`);
+            if (typeof userId !== "string" || !userId) throw new TypeError(`storage.account: userId must be a non-empty string, got ${shownValue(userId)}; no account is signed in yet`);
             let scoped = accounts.get(userId);
             if (!scoped) accounts.set(userId, scoped = store(storageName(id, userId)));
             return scoped;

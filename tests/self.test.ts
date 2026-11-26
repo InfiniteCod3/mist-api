@@ -21,7 +21,7 @@ test("a $self name the definition has no function for is a warning, logged once 
 
     const first = start("t-self-typo");
     definition.start!(first.ctx);
-    const line = "patches[1] calls $self.injectButon, but the definition has no function injectButon, so Discord's code gets undefined there. Did you mean injectButton?";
+    const line = "patches[1] calls $self.injectButon, but the definition has no function injectButon: Discord's code gets undefined there. Did you mean injectButton?";
     expect(Mist().get("t-self-typo").state().warnings).toEqual([line]);
     expect(warns(first)).toEqual([line]);
 
@@ -51,10 +51,10 @@ test("each form of $self is checked: a call, an optional call, and a read of a m
     const run = start("t-self-forms");
     definition.start!(run.ctx);
     expect(Mist().get("t-self-forms").state().warnings).toEqual([
-        "patches[0] calls $self.render, but the definition has no function render, so Discord's code gets undefined there",
-        "patches[0] calls $self.wrap, but the definition has no function wrap, so Discord's code gets undefined there",
-        "patches[0] calls $self.label, but the definition has no function label, so Discord's code gets undefined there",
-        "patches[0] reads $self.enabled, but the definition has no enabled, so Discord's code gets undefined there",
+        "patches[0] calls $self.render, but the definition has no function render: Discord's code gets undefined there",
+        "patches[0] calls $self.wrap, but the definition has no function wrap: Discord's code gets undefined there",
+        "patches[0] calls $self.label, but the definition has no function label: Discord's code gets undefined there",
+        "patches[0] reads $self.enabled, but the definition has no enabled: Discord's code gets undefined there",
     ]);
 });
 

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,12 +45,34 @@ beforeAll(async () => {
     await evaluate(page.send, `document.open(); document.write(${JSON.stringify(PAGE)}); document.close(); true`);
 }, 30_000);
 
+/** Stops Chrome cleanly via CDP, killing its process tree if it hasn't exited within `graceMs` */
+async function stopChrome(browserProcess: ChildProcess, conn?: Connection, graceMs = 5000): Promise<void> {
+    if (browserProcess.exitCode !== null || browserProcess.signalCode !== null) return;
+    const exited = new Promise<void>(resolve => browserProcess.once("exit", () => resolve()));
+    // Ask Chrome to shut down its whole process tree (GPU, network, crashpad) so profile locks release
+    if (conn) await conn.send("Browser.close").catch(() => { });
+    else browserProcess.kill();
+    const forceKill = () => {
+        if (process.platform === "win32" && browserProcess.pid) {
+            try { execFileSync("taskkill", ["/PID", String(browserProcess.pid), "/T", "/F"], { stdio: "ignore" }); } catch { }
+        } else {
+            browserProcess.kill("SIGKILL");
+        }
+    };
+    const timer = setTimeout(forceKill, graceMs);
+    try {
+        await Promise.race([exited, Bun.sleep(graceMs * 2)]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 afterAll(async () => {
+    if (chrome) await stopChrome(chrome, page);
     page?.close();
-    chrome?.kill();
-    if (chrome) await new Promise(resolve => chrome!.once("exit", resolve));
-    rmSync(profile, { recursive: true, force: true });
-});
+    // Chrome or Windows Defender can hold a profile handle briefly after exit
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { }
+}, 20_000);
 
 const rules = (box: Box) => box.rules.map(r => `${[...r.conditions, r.selector].join(" ")} { ${r.declarations.join("; ")} }`);
 

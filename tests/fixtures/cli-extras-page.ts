@@ -85,6 +85,32 @@ const scenarios: Record<string, () => Promise<unknown>> = {
         return records.map(r => ({ text: r.text.split("\n")[0], plugins: r.plugins, original: r.frames[0]?.original ?? null }));
     },
 
+    /** A module that threw is recompiled, as a hot reload does, and the plugins patching it change */
+    async errorsRepatched() {
+        let patcher = "before";
+        g.Evi = { plugins: { getSnapshot: () => [] }, diagnosePatches: () => [{ plugin: patcher, index: 0, modules: ["77"] }] };
+        const exception = (timestamp: number) => emit("Runtime.exceptionThrown", { timestamp, exceptionDetails: { text: "Uncaught", exception: { type: "object", subtype: "error", description: "TypeError: x is undefined\n    at render (evi://modules/77.js:1:50)" } } });
+        const records: ErrorRecord[] = [];
+        let polls = 0;
+        await watchErrors(send, listen, {
+            follow: true,
+            limits: DISPLAY,
+            settleMs: 50,
+            pollMs: 20,
+            stopped: () => {
+                polls++;
+                if (polls === 3) {
+                    patcher = "after";
+                    g.compiled77 = (0, eval)("0,function () { }\n//# sourceURL=evi://modules/77.js");
+                }
+                if (polls === 6) exception(2000);
+                return polls > 9;
+            },
+            onReplayed: () => exception(1000),
+        }, r => records.push(r));
+        return records.map(r => [r.plugins, r.via]);
+    },
+
     /** Debugger.paused fires at once on this in-process session, so a pause CDP lets through is seen */
     async pauses() {
         g.Evi = { wreq: { m: { 5: function five() { } }, c: {} }, diagnosePatches: () => [] };
@@ -134,6 +160,9 @@ const scenarios: Record<string, () => Promise<unknown>> = {
                 { plugin: "beta", index: 0, state: "applied", modules: ["3"], patch: { find: "d", replace: { match: "y", with: () => "$self.hidden()" } } },
                 { plugin: "alpha", index: 3, state: "partial", modules: ["5"], patch: { find: "f", replace: { match: "y", with: "$self.used() || $self.neverButAnotherRan()" } } },
                 { plugin: "beta", index: 1, state: "applied", modules: ["4"], patch: { find: "e", replace: { match: "y", with: "plain" } } },
+                // Evi calls both "ambiguous" when their find matches several modules; only the first applied
+                { plugin: "gamma", index: 0, state: "applied", health: "ambiguous", modules: ["6"], patch: { find: "g", replace: { match: "y", with: "$self.appliedOnce()" } } },
+                { plugin: "gamma", index: 1, state: "pending", health: "ambiguous", modules: [], patch: { find: "h", replace: { match: "y", with: "$self.notYet()" } } },
             ],
         };
         return await readPerf(send);
@@ -183,6 +212,37 @@ const scenarios: Record<string, () => Promise<unknown>> = {
             listeners: listeners.size,
             missing: await failure(watchDev(send, "nope", { patches: async () => null }, () => { })),
         };
+    },
+
+    /** The plugin is uninstalled, then other plugins' changes keep notifying */
+    async devRemoved() {
+        const listeners = new Set<() => void>();
+        let me: object | undefined = { manifest: { id: "demo", name: "Demo", version: "1.0.0" }, source: "dev", running: true };
+        g.Evi = {
+            plugins: {
+                get: (id: string) => id === "demo" ? me : undefined,
+                getSnapshot: () => me ? [me] : [],
+                subscribe: (fn: () => void) => {
+                    listeners.add(fn);
+                    return () => listeners.delete(fn);
+                },
+            },
+        };
+        const notify = () => listeners.forEach(fn => fn());
+        const outcomes: DevOutcome[] = [];
+        let polls = 0;
+        const steps: [number, () => void][] = [[2, () => { me = undefined; notify(); }], [3, notify], [12, notify], [22, notify]];
+        await watchDev(send, "demo", {
+            pollMs: 10,
+            settleMs: 40,
+            stopped: () => {
+                polls++;
+                for (const [at, step] of steps) if (at === polls) step();
+                return polls > 32;
+            },
+            patches: async () => null,
+        }, o => outcomes.push(o));
+        return outcomes.map(o => ({ removed: o.removed, version: o.state.version }));
     },
 
     async module() {

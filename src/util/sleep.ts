@@ -1,6 +1,9 @@
+import { checkDelay } from "../internal.ts";
+
 /** Resolves after `ms`; rejects with the signal's reason if it aborts first */
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
+        checkDelay("sleep", "ms", ms);
         if (signal?.aborted) return reject(signal.reason);
         const onAbort = () => {
             clearTimeout(timer);

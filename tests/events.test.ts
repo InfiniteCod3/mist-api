@@ -217,3 +217,13 @@ test("subscribe needs a running plugin, and the listener is typed from the nativ
     // @ts-expect-error a plugin without a channel gets no events
     void (() => none.events.subscribe((note: Note) => note));
 });
+
+test("an event IPC can't clone throws when pushed, and the channel keeps delivering the rest", async () => {
+    const { events, module } = await nativeWith();
+    const start = await poll(module, null, 0);
+    const withCallback = { type: "toast", text: "hi", onClick: () => { } } as Note;
+    expect(() => events.push(withCallback)).toThrow(expect.objectContaining({ name: "NativeError", code: "unclonable" }));
+    events.push({ type: "saved", id: "1" });
+    const answer = await poll(module, start.boot, start.cursor);
+    expect(structuredClone(answer).events).toEqual([{ type: "saved", id: "1" }]);
+});

@@ -1,6 +1,6 @@
 # Testing
 
-`@aurologic/mist-api/testing` has test doubles for a plugin's unit tests: a fake plugin context, a fake Flux store, a fake Flux dispatcher, a fake `@evi/api` module, and a fake `electron` module. They work with any test runner. The module imports no runner, nothing at runtime from `@evi/api`, and not Electron, so it loads in Bun, Vitest, Jest, or plain Node.
+`@aurologic/mist-api/testing` has test doubles for a plugin's unit tests: a fake plugin context, a fake Flux store, a fake Flux dispatcher, a fake `@evi/api` module, and a fake `electron` module. They work with any test runner. The module imports no runner, nothing at runtime from `@evi/api`, and not Electron: it loads in Bun, Vitest, Jest, or plain Node.
 
 ```ts
 import { fakeContext, fakeDispatcher, fakeElectron, fakeEvi, fakeStore } from "@aurologic/mist-api/testing";
@@ -10,7 +10,7 @@ A plugin never bundles it. Import it only from test files.
 
 ## Mock @evi/api
 
-Evi's build provides `@evi/api` when it bundles a plugin, so it doesn't exist when a test runs. Code that imports it, including `@aurologic/mist-api/stores`, needs a module mock. `fakeEvi()` makes the mock's module object:
+Evi's build provides `@evi/api` when it bundles a plugin, and the module doesn't exist when a test runs. Code that imports it, including `@aurologic/mist-api/stores`, needs a module mock. `fakeEvi()` makes the mock's module object:
 
 ```ts
 // Bun
@@ -35,7 +35,7 @@ const evi = await vi.hoisted(async () => {
 vi.mock("@evi/api", () => evi.module);
 ```
 
-Bun applies `mock.module` only to imports that come after it, so import the code under test with a dynamic `import()`. Vitest moves `vi.hoisted` and `vi.mock` above the file's imports, so a `vi.hoisted` callback imports what it needs itself. Leave out `React` when nothing under test reads it from `@evi/api`.
+Bun applies `mock.module` only to imports that come after it: import the code under test with a dynamic `import()`. Vitest moves `vi.hoisted` and `vi.mock` above the file's imports, and a `vi.hoisted` callback has to import what it needs. Leave out `React` when nothing under test reads it from `@evi/api`.
 
 `evi.module` has these members:
 
@@ -44,12 +44,14 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | `findStore(name)` | Returns the store added under `name`, or `undefined`. Throws while `evi.ready` is `false`, as Evi's does before Discord's webpack has loaded. |
 | `getStore(name)` | Like `findStore`, but throws when there is no such store. |
 | `filters.byStoreName(name)` | A filter that takes the store added under `name`. |
+| `filters.byProps(...props)` | A filter that takes a value with every named property, as Evi's does. |
+| `filters.byCode(...code)` | A filter that takes a function whose source contains every string and matches every `RegExp`, as Evi's does. |
 | `waitFor(filter, callback)` | Calls back at once with a store the filter takes. Otherwise it calls back when `evi.addStore` adds one. Returns a function that stops the wait. |
 | `find(filter)`, `findAll(filter)` | The first, or every, added store or export the filter takes. A filter that throws counts as not taking the value, as in Evi. |
 | `I18n` | `{ discordLocale: "en-US" }`. Set `discordLocale` to test another language. |
 | `Dispatcher` | A `fakeDispatcher()`. |
-| `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed, and then it isn't enumerable, so spreading the module object leaves it out. |
-| `Components` | Evi's components, empty, so the `Button` and `Tip` of `@aurologic/mist-api/ui` render their own fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. |
+| `React` | The `React` passed to `fakeEvi`. Reading it throws when none was passed, and it then isn't enumerable: spreading the module object leaves it out. |
+| `Components` | Evi's components, empty: the `Button` and `Tip` of `@aurologic/mist-api/ui` render their fallback. Set `Button` or `Tooltip` on it to render a stand-in for Discord's. |
 
 `evi` itself controls the fake:
 
@@ -60,8 +62,12 @@ Bun applies `mock.module` only to imports that come after it, so import the code
 | `addExport(value)` | Adds a module export that `find` and `findAll` search, as Evi's search Discord's webpack exports. |
 | `ready` | While `false`, `findStore` and `getStore` throw. `true` by default. |
 | `lookups` | Each name `findStore` and `getStore` were asked for, oldest first. |
+| `plugins` | Evi's plugin list, as `window.Evi.plugins` gives it: `get(id)`, `subscribe(listener)`, and the `listeners` now subscribed. |
+| `setPlugin(id, info?)` | Adds the installed plugin `id`, or replaces it, and calls the plugin list's subscribers. `info` has `name` (the id by default), `version`, `running`, `evaluated`, and `enabled` (each `true` by default), `error`, and `enabledByDefault`. |
+| `removePlugin(id)` | Removes an installed plugin and calls the subscribers. |
+| `installGlobal()` | Sets `globalThis.Evi` to `{ plugins, settings }`, for code that reads `window.Evi`. Returns a function that puts back what was there. |
 
-The fake has every export that mist-api's own code imports from `@evi/api`. Only the members above exist. Code that uses another export of `@evi/api`, such as `showToast` or `filters.byProps`, needs the test to add it to the module object:
+The fake has every export that mist-api's code imports from `@evi/api`, and only the members above. Code that uses another export of `@evi/api`, such as `showToast`, needs the test to add it to the module object:
 
 ```ts
 mock.module("@evi/api", () => ({ ...evi.module, showToast: () => { } }));
@@ -96,7 +102,7 @@ test("redraws when the presence changes", () => {
 function fakeDispatcher(): FakeDispatcher;
 ```
 
-Makes a Flux dispatcher with `subscribe`, `unsubscribe`, and `dispatch`. `dispatch(action)` calls each handler subscribed to `action.type` before it returns, and adds the action to `dispatched`. `fakeEvi` and `fakeContext` each make one, so a test rarely needs this.
+Makes a Flux dispatcher with `subscribe`, `unsubscribe`, and `dispatch`. `dispatch(action)` calls each handler subscribed to `action.type` before it returns, and adds the action to `dispatched`. `fakeEvi` and `fakeContext` each make one; a test rarely needs this directly.
 
 ## fakeContext
 
@@ -111,22 +117,24 @@ import plugin from "./index";
 
 test("starts, logs, and cleans up", async () => {
 	const run = fakeContext({ id: "weather-demo", schema: plugin.settings, settings: { units: "metric" } });
-	await plugin.start!(run.ctx);
+	await plugin.start(run.ctx);
 	expect(run.logs).toContainEqual({ level: "info", args: ["started"] });
 	run.dispose();
 	expect(run.styles).toEqual([]);
 });
 ```
 
+`mist.define` always returns a `start`, typed as required: a test calls `plugin.start(run.ctx)` without `!`.
+
 The options:
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `id` | `"test"` | The plugin id: `ctx.id`, and `ctx.manifest.id` and `name`. |
+| `id` | `"test"` | The plugin id: `ctx.id`, and `ctx.manifest.id` and `name`. Pass the id given to `createMist`. |
 | `schema` | `{}` | The settings schema, for the defaults of `ctx.settings.get` and `ctx.settings.all`. |
-| `settings` | `{}` | Stored setting values. `ctx.settings.set` writes into this object, so passing it to the next `fakeContext` starts again with the same settings, as after a restart. |
+| `settings` | `{}` | Stored setting values. `ctx.settings.set` writes into this object. Pass it to the next `fakeContext` to start again with the same settings, as after a restart. |
 | `native` | none | Answers `ctx.native.call(method, ...args)`. Without it, `ctx.native.call` throws `<id> has no native module`, as Evi's does for a plugin without a native module. |
-| `evi` | a new `fakeEvi()` | The fake `@evi/api` that `ctx.waitFor` and `ctx.flux` use. Pass the one the module mock returns, so that both see the same stores and dispatcher. |
+| `evi` | a new `fakeEvi()` | The fake `@evi/api` that `ctx.waitFor` and `ctx.flux` use. Pass the one the module mock returns: both then see the same stores and dispatcher. |
 | `overrides` | none | Replaces members of the context. |
 
 What the context does:
@@ -139,7 +147,7 @@ What the context does:
 | `waitFor(filter, callback)` | Waits through `evi.module.waitFor`. `dispose()` stops the wait. |
 | `flux.subscribe(type, handler)` | Subscribes through `evi.module.Dispatcher`. A handler that throws is logged as an error, not thrown. `dispose()` unsubscribes. |
 | `flux.dispatch(action)` | Dispatches through `evi.module.Dispatcher`. |
-| `native.call(method, ...args)` | Calls the `native` option. `mist.native` first calls `__mist_protocol` once per run; a `native` that doesn't answer it with a number gets calls as Evi passes them, with no call mark. |
+| `native.call(method, ...args)` | Calls the `native` option. `mist.native` first calls `__mist_protocol` once per run. A `native` that doesn't answer it with a number gets calls as Evi passes them, with no call mark. |
 | `addStyle(css)` | Adds the CSS to `styles` until `remove()` or `dispose()`. `update(css)` replaces it. |
 | `toast(message)` | Adds the message to `toasts`. |
 | `setInterval`, `setTimeout` | Real timers that `dispose()` clears. |
@@ -166,21 +174,30 @@ const run = fakeContext({
 });
 ```
 
-Evi's `PluginContext` is a class with private fields, so no other object matches its type. `fakeContext` casts its plain object to `PluginContext<S>`. A test that reads a member the fake doesn't have gets `undefined` at runtime, even though the type says it exists.
+Evi's `PluginContext` is a class with private fields, and no other object matches its type. `fakeContext` casts its plain object to `PluginContext<S>`. A test that reads a member the fake doesn't have gets `undefined` at runtime, even though the type says it exists.
 
 ### Testing discord() and the UI registries
 
-`discord(mist)` and the registries in `@aurologic/mist-api/ui` take only a `mist` that `mist.define` registered, and look the plugin up in `window.Evi.plugins` to read its manifest's `permissions`. A test starts the plugin with a fake context and puts a stand-in for `Evi.plugins` on `globalThis`:
+`discord(mist)` and the registries in `@aurologic/mist-api/ui` take the plugin's `mist` object as `createMist` returned it. They look the plugin up in `window.Evi.plugins` to read its manifest's `permissions`, and an id Evi doesn't list throws an `UnknownPluginError`. Add the plugin to the fake's list and install it on `globalThis`:
 
 ```ts
-(globalThis as any).Evi = { plugins: { get: (id: string) => id === "weather-demo" ? { manifest: { id, permissions: { readMessages: true } } } : undefined } };
-const definition = mist.define({});
-const run = fakeContext({ id: "weather-demo" });
-definition.start!(run.ctx);
+import plugin, { mist } from "./index";
+
+const restore = evi.installGlobal();
+evi.setPlugin("weather-demo");
+
+const api = discord(mist);
+const run = fakeContext({ id: "weather-demo", evi });
+plugin.start(run.ctx);
 messages.beforeSend(mist, "trim", draft => { draft.content = draft.content.trim(); });
+
+run.dispose();
+restore();
 ```
 
-Leave out `permissions` for a plugin that declares none.
+`discord(mist)` works without a run. The registries need the plugin running, as in Discord: start it with a fake context first.
+
+A plugin added with `setPlugin` declares no `permissions`, and mist holds it to nothing, as Evi does. The fake has no way to declare permissions: check a refused call in Discord, with the plugin's real manifest.
 
 ## Mock electron
 
@@ -188,7 +205,7 @@ Leave out `permissions` for a plugin that declares none.
 function fakeElectron(options?: FakeElectronOptions): FakeElectron;
 ```
 
-Electron's main-process module only exists inside Electron, so a native side's unit tests need a module mock of `electron`. `fakeElectron()` makes the mock's module object, and the parts of it that mist-api's native toolkit and most native sides use:
+Electron's main-process module only exists inside Electron, and a native side's unit tests need a module mock of `electron`. `fakeElectron()` makes the mock's module object, with the parts of it that mist-api's native toolkit and most native sides use:
 
 ```ts
 // Bun
@@ -204,16 +221,16 @@ const { default: native } = await import("./native");
 
 | Member | Fake |
 | --- | --- |
-| `BrowserWindow` | A constructor: `new BrowserWindow(options)` makes a window that records `options` and every `loadURL`. `getAllWindows()` lists the windows not destroyed, `fromId(id)` finds one, and `getFocusedWindow()` is the last one focused. |
+| `BrowserWindow` | A class: `win instanceof BrowserWindow` holds as with Electron's. `new BrowserWindow(options)` makes a window that records `options` and every `loadURL`. `getAllWindows()` lists the windows not destroyed, `fromId(id)` finds one, and `getFocusedWindow()` is the last one focused. |
 | `session` | `fromPartition(partition)` gives one session per partition, and `defaultSession` is the session of `""`. Each session's `fetch` is answered by the fake's `fetch` and recorded in `fetched`. It has a cookie jar (`cookies.get`, `set`, `remove`, `flushStore`, and the `changed` event), records its permission handlers, keeps a user agent, and `clearStorageData()` empties the jar. |
 | `shell` | `openExternal(url)` adds `url` to `opened`. |
 | `dialog` | `showOpenDialog`, `showSaveDialog`, and `showMessageBox` answer `dialogAnswers.open`, `.save`, and `.message`, and add `{ kind, parent, options }` to `dialogCalls`. |
-| `safeStorage` | A reversible stand-in for encryption, so `secrets` can be tested. It throws while `encryptionAvailable` is `false`. |
-| `app` | An `EventEmitter`, so `app.emit("will-quit")` is Discord quitting, with `getPath(name)` and `getVersion()`. |
+| `safeStorage` | A reversible stand-in for encryption, for testing `secrets`. It throws while `encryptionAvailable` is `false`. |
+| `app` | An `EventEmitter`, where `app.emit("will-quit")` is Discord quitting, with `getPath(name)` and `getVersion()`. |
 
 A window from the fake is an `EventEmitter` with Electron's window methods (`focus`, `show`, `minimize`, `restore`, `getBounds`, `destroy`, and more) and test helpers:
 
-- `navigate(url)` is the page going to `url`. It emits `will-navigate` on `webContents` with an event the code can `preventDefault`, and when the code doesn't, it sets the URL and emits `did-navigate`. It returns whether the page went.
+- `navigate(url)` is the page going to `url`. It emits `will-navigate` on `webContents` with an event the code can `preventDefault`. When the code doesn't, it sets the URL and emits `did-navigate`. It returns whether the page went.
 - `close()` is the user closing the window. It emits `close`, and unless that is prevented, destroys the window, which emits `closed`.
 - `loaded` lists the URLs given to `loadURL`, `webContents.windowOpenHandler` is the handler the code set for popups, and `options` is what the constructor got.
 
@@ -221,14 +238,14 @@ A window from the fake is an `EventEmitter` with Electron's window methods (`foc
 
 | Member | Does |
 | --- | --- |
-| `addWindow({ url, bounds })` | Adds a window that is already open, such as Discord's own. `url` defaults to `https://discord.com/app`. Set `globalThis.mainWindowId` to its `id` to make it Discord's main window. |
+| `addWindow({ url, bounds })` | Adds a window that is already open, such as Discord's. `url` defaults to `https://discord.com/app`. Set `globalThis.mainWindowId` to its `id` to make it Discord's main window. |
 | `windows` | Every window, destroyed ones too, oldest first. |
 | `fetch` | Answers every session's `fetch` with `(url, init, partition)`. A 404 by default, or the `fetch` option. Set it any time. |
 | `sessions` | Each session made, by partition. |
 | `opened` | Each URL `shell.openExternal` got. |
 | `dialogAnswers`, `dialogCalls` | What each kind of dialog answers next, and each dialog shown. |
 | `encryptionAvailable`, `storageBackend` | What `safeStorage` reports. `true` and `"gnome_libsecret"` by default. |
-| `reset()` | Destroys every window and empties the sessions, links, and dialog calls, and sets the answers back. Call it between tests. |
+| `reset()` | Destroys every window, empties the sessions, links, and dialog calls, and sets the answers back. Call it between tests. |
 
 The options are `fetch`, `userAgent` (each session's starting user agent, a Discord desktop one with Electron and discord tokens by default), and `paths` (what `app.getPath` answers, by name, `/fake/<name>` by default). Only the members above exist. A native side that uses another part of Electron, such as `net`, needs the test to add it: `mock.module("electron", () => ({ ...electron.module, net: { fetch } }))`.
 
@@ -237,7 +254,7 @@ test("signs in through the login window", async () => {
 	electron.reset();
 	const signedIn = native.connect();
 	const win = electron.windows.at(-1)!;
-	await electron.sessions.get("persist:music-demo-music")!.cookies.set({ url: "https://music.example.com", name: "session", value: "1" });
+	await electron.sessions.get("persist:mist:music-demo:music")!.cookies.set({ url: "https://music.example.com", name: "session", value: "1" });
 	win.navigate("https://music.example.com/home");
 	expect(await signedIn).toBe(true);
 	expect(win.isDestroyed()).toBe(true);

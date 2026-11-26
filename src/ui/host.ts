@@ -2,11 +2,11 @@ import { React } from "@evi/api";
 import type { ComponentType } from "react";
 
 import { Boundary, type Fallback } from "./boundary.ts";
-import { notify, type Owner, owned, shared } from "./shared.ts";
+import { instanceIds, notify, type Owned, type Owner, owned, uiState } from "./shared.ts";
 
 interface Shown<P> {
     readonly Component: ComponentType<P>;
-    readonly owner: ReturnType<typeof owned>;
+    readonly owner: Owned;
     readonly fallback: Fallback | undefined;
 }
 
@@ -34,24 +34,26 @@ export interface Host<P> {
 }
 
 /**
- * A stable mount point for a plugin's UI. Discord keeps whatever component a patch handed it, so a
+ * A stable mount point for a plugin's UI. Discord keeps whatever component a patch handed it: a
  * component from the plugin's code would be the stopped copy's after a hot reload. Mount `Component`
  * instead and `set` the real one on each start. `name` is the protocol between copies: prefix it
  * with the plugin's id and change it when the props change.
  */
 export function host<P extends object = {}>(name: string): Host<P> {
-    if (!name) throw new Error("mist ui: a host needs a name");
-    const state = shared<HostState<P>>(`host/${name}`, () => {
+    if (!name) throw new TypeError("host: name must be a non-empty string");
+    const state = uiState<HostState<P>>(`host/${name}`, () => {
         const made: Omit<HostState<P>, "Host"> = { protocol: 1, listeners: new Set(), current: undefined };
         const listen = (listener: () => void) => {
             made.listeners.add(listener);
             return () => void made.listeners.delete(listener);
         };
         const read = () => made.current;
+        const idOf = instanceIds();
         function MistHost(props: P) {
             const shown = React.useSyncExternalStore(listen, read);
             if (!shown) return null;
-            return React.createElement(Boundary, { name: `${shown.owner.id}'s ${name}`, mist: shown.owner, fallback: shown.fallback },
+            // A new key on each set: a fixed component from a reload doesn't stay behind the old fallback
+            return React.createElement(Boundary, { key: idOf(shown), name: `${shown.owner.id}'s ${name}`, mist: shown.owner, fallback: shown.fallback },
                 React.createElement(shown.Component, props));
         }
         MistHost.displayName = `MistHost(${name})`;
@@ -64,11 +66,11 @@ export function host<P extends object = {}>(name: string): Host<P> {
             const by = owned(owner);
             const shown: Shown<P> = { Component, owner: by, fallback: options.fallback };
             state.current = shown;
-            notify(state.listeners);
+            notify("host", state.listeners);
             const release = () => {
                 if (state.current !== shown) return;
                 state.current = undefined;
-                notify(state.listeners);
+                notify("host", state.listeners);
             };
             by.onDispose(release);
             return release;

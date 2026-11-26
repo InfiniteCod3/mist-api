@@ -1,8 +1,18 @@
 /**
- * Code the CLI runs in Discord's page. Each function here and in the page functions of flux.ts,
- * store.ts and inspect.ts is sent as its source text, so it must not use anything from outside its
- * own body: no imports, no module constants, no helpers.
+ * Code the CLI runs in Discord's page. pageSnapshot and every function passed to pageCall is sent as
+ * its source text: it must not use anything from outside its body, such as imports, module
+ * constants or helpers. Importing types is fine, as they are erased.
  */
+import { CliError, evaluate, type Send } from "./cdp.ts";
+
+/** `globalThis` as page code sees it, with the page globals in `T` */
+export type PageGlobal<T> = typeof globalThis & T;
+
+/** What a page function returns to refuse; pageCall throws it as a CliError */
+export interface PageError { error: string; }
+
+/** How long the page keeps a watch the CLI stopped reading */
+export const WATCH_TTL_MS = 15_000;
 
 /** How much of a value pageSnapshot keeps */
 export interface Limits { string: number; items: number; keys: number; depth: number; nodes: number; }
@@ -14,7 +24,7 @@ export const RECORDED: Limits = { string: 2000, items: 50, keys: 50, depth: 6, n
 
 /**
  * src/values.ts's snapshot for the page, with the built-in secret names only: fields and Map keys
- * named like secrets are masked, strings, lists and depth are bounded. tests/page.test.ts checks
+ * named like secrets are masked, strings, lists and depth are bounded. tests/cli.test.ts checks
  * that both give the same answers. `nodes` bounds the objects copied in all.
  */
 export function pageSnapshot(value: unknown, limits: Limits): unknown {
@@ -75,7 +85,17 @@ export function pageSnapshot(value: unknown, limits: Limits): unknown {
 }
 
 /** An expression that calls `fn` in the page with JSON `args`, after pageSnapshot when `snapshot` is set */
-export function pageExpression(fn: (...args: any[]) => unknown, args: unknown[], snapshot = false): string {
-    const json = args.map(a => JSON.stringify(a) ?? "undefined");
+export function pageExpression(fn: (...args: never[]) => unknown, args: unknown[], snapshot = false): string {
+    const json = args.map(arg => JSON.stringify(arg) ?? "undefined");
     return `(${fn})(${[...snapshot ? [String(pageSnapshot)] : [], ...json].join(", ")})`;
+}
+
+const isPageError = (value: unknown): value is PageError =>
+    typeof value === "object" && value !== null && "error" in value && typeof value.error === "string";
+
+/** Runs `fn` in the page as pageExpression does and returns its answer, throwing a `{ error }` it returns */
+export async function pageCall<T>(send: Send, fn: (...args: never[]) => T | PageError, args: unknown[], snapshot = false): Promise<T> {
+    const answer = await evaluate<T | PageError>(send, pageExpression(fn, args, snapshot));
+    if (isPageError(answer)) throw new CliError(answer.error);
+    return answer;
 }

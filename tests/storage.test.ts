@@ -60,7 +60,7 @@ test("update with an async function rejects, saying it must be synchronous, and 
     await store.set("count", 1);
     const err = await store.update("count", async value => (value as number) + 1).then(() => undefined, (e: unknown) => e);
     expect(err).toBeInstanceOf(TypeError);
-    expect((err as Error).message).toStartWith("update's function must be synchronous");
+    expect((err as Error).message).toStartWith("storage.update: fn must be synchronous");
     expect(await store.get("count")).toBe(1);
     // A rejecting async function doesn't leave an unhandled rejection behind
     await expect(store.update("count", async () => { throw new Error("late"); })).rejects.toThrow("must be synchronous");
@@ -69,7 +69,8 @@ test("update with an async function rejects, saying it must be synchronous, and 
 test("a value JSON can't write rejects and stores nothing", async () => {
     const storage = createMist("t-storage-json").storage;
     await expect(storage.set("big", 1n)).rejects.toThrow(/BigInt/);
-    await expect(storage.set("fn", () => 1)).rejects.toThrow(/Can't store function as JSON/);
+    await expect(storage.set("fn", () => 1)).rejects.toThrow("storage.set can't be stored as JSON (got a function)");
+    await expect(storage.set("undef", undefined)).rejects.toThrow("storage.set can't be stored as JSON (got undefined)");
     await expect(storage.update("big", () => 1n)).rejects.toThrow(/BigInt/);
     expect(await storage.keys()).toEqual([]);
 });
@@ -98,7 +99,7 @@ test("the database is mist's own, so it never opens the evi-<id> one the plugin 
 test("without IndexedDB each call rejects with an error that says so", async () => {
     delete root.indexedDB;
     const storage = createMist("t-storage-none").storage;
-    await expect(storage.get("k")).rejects.toThrow("IndexedDB isn't available on this page, so mist-api:t-storage-none can't be opened");
+    await expect(storage.get("k")).rejects.toThrow("IndexedDB isn't available on this page: mist-api:t-storage-none can't be opened");
     await expect(storage.set("k", 1)).rejects.toThrow(/IndexedDB isn't available/);
 });
 
@@ -141,4 +142,16 @@ test("a stored value that isn't JSON rejects get with the parse error", async ()
     });
     db.close();
     await expect(storage.get("k")).rejects.toBeInstanceOf(SyntaxError);
+});
+
+test("a connection that opens after the open was reported blocked is closed, not leaked", async () => {
+    let closed = 0;
+    const request = {} as { onblocked?: () => void; onsuccess?: () => void; result: { close(): void; }; };
+    request.result = { close: () => void closed++ };
+    root.indexedDB = { open: () => request };
+    const pending = createMist("t-storage-blocked").storage.get("k");
+    request.onblocked!();
+    await expect(pending).rejects.toThrow(/blocked/);
+    request.onsuccess!();
+    expect(closed).toBe(1);
 });

@@ -1,11 +1,4 @@
-/** Runs `fn` now, turning a synchronous throw into a rejection */
-function begin<T>(fn: () => Promise<T> | T): Promise<T> {
-    try {
-        return Promise.resolve(fn());
-    } catch (err) {
-        return Promise.reject(err);
-    }
-}
+import { begin } from "../internal.ts";
 
 /**
  * Wraps `fn` so only one run is in flight: a call during a run gets that run's promise, and the first

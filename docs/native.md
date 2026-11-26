@@ -1,6 +1,6 @@
 # defineNative
 
-`@aurologic/mist-api/native` is the native side of a plugin, the code in `native.ts` that runs in Discord's main process. It exports `defineNative`, `nativeEvents`, `nativeRequests`, `NativeError`, `log`, and `debugAllowed`, which this page covers, and the [native toolkit](toolkit.md): `discordWindow`, `lifetime`, `run`, `which`, `dataFolder`, `jsonFile`, `secrets`, and `pathGrants`.
+`@aurologic/mist-api/native` is the native side of a plugin, the code in `native.ts` that runs in Discord's main process. It exports `defineNative`, `nativeEvents`, `nativeRequests`, `NativeError`, `log`, and `debugAllowed`, which this page covers, and the [native toolkit](toolkit.md): `discordWindow`, `lifetime`, `run`, `which`, `dataFolder`, `jsonFile`, `writeAtomic`, `writeAtomicSync`, `secrets`, `pathGrants`, `check`, `privateSession`, `loginWindow`, and `openExternal`.
 
 ```ts
 import { debugAllowed, defineNative, log, NativeError, nativeEvents, nativeRequests } from "@aurologic/mist-api/native";
@@ -8,7 +8,7 @@ import { debugAllowed, defineNative, log, NativeError, nativeEvents, nativeReque
 
 ## How Evi runs a native module
 
-Evi loads `native.js` in Discord's main process and keeps its default export as the module. When the page calls `ctx.native.call(method, ...args)`, Evi runs `fn.apply(module, args)` for the exported function named `method`. `start` and `stop` are lifecycle hooks and the page can't call them. Arguments and results cross Electron's IPC, so they are structured-cloned.
+Evi loads `native.js` in Discord's main process and keeps its default export as the module. When the page calls `ctx.native.call(method, ...args)`, Evi runs `fn.apply(module, args)` for the exported function named `method`. `start` and `stop` are lifecycle hooks and the page can't call them. Arguments and results cross Electron's IPC, which structured-clones them.
 
 Two limits shape what mist-api does here:
 
@@ -44,7 +44,7 @@ export default defineNative({
 		log.info("native side up in", ctx.dataDir);
 	},
 
-	async lookup(place: Place): Promise<Forecast | null> {
+	async forecast(place: Place): Promise<Forecast | null> {
 		if (!isRecord(place) || typeof place.latitude !== "number" || typeof place.longitude !== "number") throw new Error("Bad place");
 		const url = new URL("https://api.open-meteo.com/v1/forecast");
 		url.searchParams.set("latitude", String(place.latitude));
@@ -75,9 +75,9 @@ Members of `methods` that aren't functions are skipped.
 
 ### Types
 
-`NativeMethods<M>` gives `start` the type `(ctx: NativeContext) => void` and `stop` the type `() => void`, so `start(ctx)` needs no annotation. Every other method keeps the type you wrote.
+`NativeMethods<M>` gives `start` the type `(ctx: NativeContext) => void` and `stop` the type `() => void`: `start(ctx)` needs no annotation. Every other method keeps the type you wrote.
 
-The page infers `mist.native` from the method types. Write the parameter type you expect, such as `place: Place`, so the page side is typed. The type is a promise to the page and nothing more. The page is untrusted and IPC checks nothing, so validate every argument inside the method anyway.
+The page infers `mist.native` from the method types. Write the parameter type you expect, such as `place: Place`, and the page side is typed. The type is a promise to the page and nothing more. The page is untrusted and IPC checks nothing: validate every argument inside the method anyway, with [`check`](toolkit.md#check).
 
 `MistNative<M, E, R>` is `M` plus `start`, `stop`, and the hidden methods. `E` is the type of the event channel's events, and `R` is the map of requests that the native side makes. Pass `typeof native` to `createMist` as its second type parameter:
 
@@ -89,7 +89,7 @@ export const mist = createMist<typeof settings, typeof native>("weather-demo");
 
 ### this
 
-Inside a method, `this` is the returned module with one more member, `this.signal`, the call's own `AbortSignal`. A method can call another one through `this`, and that inner call is recorded too and gets the same `signal`. A value that a method stores on `this` is stored on the module, so the next call sees it:
+Inside a method, `this` is the returned module with one more member, `this.signal`, the call's `AbortSignal`. A method can call another one through `this`, and that inner call is recorded too and gets the same `signal`. A value that a method stores on `this` is stored on the module, where the next call sees it:
 
 ```ts
 export const counter = defineNative({
@@ -114,9 +114,9 @@ export default defineNative({
 });
 ```
 
-An arrow function has no `this`, so write a method that reads `this.signal` with method syntax.
+An arrow function has no `this`. Write a method that reads `this.signal` with method syntax.
 
-In `start` and `stop`, `this.signal` is the run's signal. It aborts after `stop` returns, so work that `start` begins with it ends when the native side stops. A new `start` gets a new signal.
+In `start` and `stop`, `this.signal` is the run's signal. It aborts after `stop` returns: work that `start` begins with it ends when the native side stops. A new `start` gets a new signal.
 
 ### NativeOptions
 
@@ -138,7 +138,7 @@ interface NativeOptions<M, E, R> {
 | `requests` | none | The requests from `nativeRequests` that the page answers with `mist.requests.handle`. [nativeRequests](#nativerequests) explains them. |
 | `secrets` | `[]` | Field names and `Map` key names masked in recorded arguments and results, on top of the built-in names that [createMist](core.md#mistoptions) lists. |
 | `reveal` | `[]` | Field names and `Map` key names shown even though a built-in name would mask them. A name in `secrets` stays masked. |
-| `secretArgs` | `{}` | For each method, the positions of arguments masked in its recorded calls, counting from 0, as in `{ login: [1] }`. Only the module's own methods can be named. |
+| `secretArgs` | `{}` | For each method, the positions of arguments masked in its recorded calls, counting from 0, as in `{ login: [1] }`. Only the module's methods can be named. |
 | `quiet` | `[]` | Methods whose calls are counted and not kept. A call of one that fails is kept like any other. `__mist_logs` answers with the counts, and `mist native-logs` prints them. |
 | `capacity` | `200` | How many calls the native side keeps, and how many log lines. It must be a positive integer. |
 
@@ -146,13 +146,13 @@ The native side records separately from the page side. Give it the same `secrets
 
 ### The native ring
 
-`defineNative` makes the native side's ring of calls and log lines, with its own `secrets` and `capacity`. It runs once per native bundle. A second call throws, because `log` records into the ring that the first call made.
+`defineNative` makes the native side's ring of calls and log lines, with its `secrets` and `capacity`. It runs once per native bundle. A second call throws, because `log` records into the ring that the first call made.
 
 A `log` line that runs before `defineNative`, such as one at module load in a file that `native.ts` imports, is printed at once and held until `defineNative` runs. Then it is recorded with `defineNative`'s options, at the time it was written. Up to 200 such lines are held, and older ones are dropped.
 
 The ring also decides once whether it keeps values whole. It keeps them whole only if main has a debugging port, as `debugAllowed()` reports. Without a port, every argument, result, log argument, and error message is reduced to its type and size when it is recorded, and nothing else is ever held in memory. Restarting Discord with a port is the only way to see native values whole.
 
-Each plugin's native bundle carries its own copy of mist-api, so each ring records one plugin. It isn't private, though. Every native module runs in the same main process with full access, so another plugin's native code can reach this module and call `__mist_logs` itself.
+Each plugin's native bundle carries a copy of mist-api, and each ring records one plugin. It isn't private, though. Every native module runs in the same main process with full access, and another plugin's native code can reach this module and call `__mist_logs` itself.
 
 ## NativeError
 
@@ -208,11 +208,11 @@ Other errors cross too:
 
 Electron turns an error thrown in main into a plain `Error` whose message starts with `Error invoking remote method 'evi:plugin-native-call':`. To keep an error's type and to abort a call, mist-api adds a small protocol on top of Evi's `ctx.native.call`. Evi needs no change.
 
-1. The first call of a page run asks the hidden `__mist_protocol` method. A module made with this `defineNative` answers `1`. Anything else, such as a module without `defineNative`, one made with mist-api 0.2.1 or earlier, or a failed call, counts as `0`. The answer is kept for the run.
+1. The first call of a page run asks the hidden `__mist_protocol` method. A module made with this `defineNative` answers `1`. A module without the method, such as one without `defineNative` or one made with mist-api 0.2.1 or earlier, counts as `0`. The answer is kept for the run. An ask that fails for another reason, such as a busy main or a native side in the middle of a restart, isn't an answer: that call goes out as with `0`, and the next call asks again.
 2. With `1`, the page adds one last argument, a call mark, `{ __mist_call: 1, id }`. `id` is a random id when the call has a signal, and `null` otherwise.
-3. `defineNative` removes the mark before your method and its record see the arguments. It answers `{ __mist_answer: 1, ok, value | error }` whatever the method does, so Electron never sees a throw.
+3. `defineNative` removes the mark before your method and its record see the arguments. It answers `{ __mist_answer: 1, ok, value | error }` whatever the method does. Electron never sees a throw.
 4. The page unwraps the answer: it returns `value`, or throws the error rebuilt as the table above says.
-5. If the page aborts the call, it rejects at once and calls `__mist_abort(id)`, which aborts the method's `this.signal`.
+5. If the page aborts the call, it rejects at once and calls `__mist_abort(id)`, which aborts the method's `this.signal`. An abort can reach the native side before its call does. The native side then keeps the id for 30 seconds, up to 256 ids, and a call with that id starts with its `this.signal` already aborted.
 
 With `0`, the page calls as earlier versions did, without a mark. This decides what each pairing does:
 
@@ -223,7 +223,7 @@ With `0`, the page calls as earlier versions did, without a mark. This decides w
 | 0.2.1 or earlier | `defineNative` 0.3 or later | As before. A method sees exactly the page's arguments, and its errors are Electron's prefixed `Error`. `this.signal` aborts only when the native side stops. |
 | No page side made with mist-api | `defineNative` 0.3 or later | As before. A call from Evi's `ctx.native.call` has no mark. |
 
-A plain native module never sees a mark, so a method with a rest parameter, or one that counts its arguments, works as it did.
+A plain native module never sees a mark. A method with a rest parameter, or one that counts its arguments, works as it did.
 
 ## nativeEvents
 
@@ -231,7 +231,7 @@ A plain native module never sees a mark, so a method with a rest parameter, or o
 function nativeEvents<E>(options?: NativeEventsOptions<E>): NativeEvents<E>;
 ```
 
-Makes an event channel from the native side to the page. Push events with `push(event)` and pass the channel to `defineNative` as `events`. The page reads it with `mist.events.subscribe`. [Events](events.md) covers its options, replay, restarts, and stop.
+Makes an event channel from the native side to the page. Push events with `push(event)` and pass the channel to `defineNative` as `events`. The page reads it with `mist.events.subscribe`. `push` throws a `NativeError` with the code `unclonable` for an event that IPC can't structured-clone, such as one holding a function. [Events](events.md) covers its options, replay, restarts, and stop.
 
 ```ts
 const events = nativeEvents<{ type: "saved"; id: string; }>({ keep: 500, replay: () => true });
@@ -278,13 +278,13 @@ mist.define({
 });
 ```
 
-The answer comes from the page, so it is untrusted input whatever `R` says. Discord's page is shared with Discord's code and every other plugin, which can change what the handler sees and does, so check the answer's type and range before acting on it, as `answer !== true` does above. Never let an answer name a path, a program, or a URL that native code then uses without checking it.
+The answer comes from the page and is untrusted input whatever `R` says. Discord's page is shared with Discord's code and every other plugin, which can change what the handler sees and does. Check the answer's type and range before acting on it, as `answer !== true` does above. Never let an answer name a path, a program, or a URL that native code then uses without checking it.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `timeoutMs` | `30000` | How long a request waits for the page's answer. It must be more than 0. `request`'s own `timeoutMs` overrides it for one request. |
+| `timeoutMs` | `30000` | How long a request waits for the page's answer. `request`'s `timeoutMs` option overrides it for one request. Either must be above 0 and at most the [timer limit](util.md#timer-limits), 2147483647. A value that isn't a number throws a `TypeError`, and one out of range a `RangeError`. |
 
-`request(name, payload, { timeoutMs, signal })` resolves with the page handler's answer. It rejects with the signal's reason when `signal` aborts, or with a `NativeError` whose code is one of these:
+`request(name, payload, { timeoutMs, signal })` throws a `NativeError` with the code `unclonable` for a payload that IPC can't structured-clone, before anything is sent. Otherwise it resolves with the page handler's answer. It rejects with the signal's reason when `signal` aborts, or with a `NativeError` whose code is one of these:
 
 | Code | When |
 | --- | --- |
@@ -295,7 +295,7 @@ The answer comes from the page, so it is untrusted input whatever `R` says. Disc
 
 A request made before the page polls waits for it, until its timeout. A page that reloads gets the requests still waiting. Each request is answered once: a second answer for the same request is refused.
 
-Requests ride a second event channel, `__mist_requests`, which the page long-polls as it does `__mist_events`, and the page answers through `__mist_reply`. Both are counted, not kept, in the call rings. The page polls only after a handler is added, and only when the native side answers `__mist_protocol`. Requests need mist-api 0.3 or later on both sides. A page that adds a handler for a native side without them logs once that the native side needs `defineNative` from mist-api 0.3 or later.
+Requests ride a second event channel, `__mist_requests`, which the page long-polls as it does `__mist_events`, and the page answers through `__mist_reply`. Both are counted, not kept, in the call rings. The page polls only after a handler is added, and only when the native side answers `__mist_protocol`. Requests need mist-api 0.3 or later on both sides. A page that adds a handler for a native side without them logs once that the native side needs `defineNative` from mist-api 0.3 or later. When the page can't reach the native side to ask, it asks again after a growing delay until the run ends.
 
 ## log
 
@@ -311,7 +311,7 @@ const log: {
 
 Logs from native code. Each line goes into the native ring for `mist native-logs` and is printed to main's stdout as `[<plugin id>] ...`. Each level prints with the `console` method of the same name. Until the module's `start` runs, the prefix is `[mist]`.
 
-String arguments are values like any other. Main's stdout is the only place they are printed, and the page never sees it. So without a debugging port they are reduced to type and size when they are recorded, and with one `mist native-logs` shows them whole. Don't put a secret in a log string.
+String arguments are values like any other. Main's stdout is the only place they are printed, and the page never sees it. Without a debugging port they are reduced to type and size when they are recorded, and with one `mist native-logs` shows them whole. Don't put a secret in a log string.
 
 ```ts
 log.info("native side up in", ctx.dataDir);

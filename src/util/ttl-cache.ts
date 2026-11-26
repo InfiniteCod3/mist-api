@@ -1,3 +1,5 @@
+import { checkNumber } from "../internal.ts";
+
 export interface TtlCacheOptions<V> {
     /** How long an entry lives, in ms: one number, or a function of the value set. 0 or less keeps nothing, Infinity keeps it until it's evicted. */
     ttlMs: number | ((value: V) => number);
@@ -21,8 +23,8 @@ export interface TtlCache<K, V> {
 
 /** A Map whose entries expire after `ttlMs`, with an optional cap that evicts the least recently used. Expired entries are dropped as they are found. */
 export function ttlCache<K, V>({ ttlMs, max = Infinity, now = Date.now }: TtlCacheOptions<V>): TtlCache<K, V> {
-    if (typeof ttlMs !== "function" && (typeof ttlMs !== "number" || Number.isNaN(ttlMs))) throw new TypeError(`ttlCache's ttlMs must be a number or a function, got ${ttlMs}`);
-    if (max !== Infinity && !(Number.isInteger(max) && max > 0)) throw new TypeError(`ttlCache's max must be a whole number above 0, got ${max}`);
+    if (typeof ttlMs !== "function" && ttlMs !== Infinity) checkNumber("ttlCache", "ttlMs", ttlMs);
+    if (max !== Infinity) checkNumber("ttlCache", "max", max, { min: 1, integer: true });
     const entries = new Map<K, { value: V; until: number; }>();
     const live = (key: K) => {
         const entry = entries.get(key);

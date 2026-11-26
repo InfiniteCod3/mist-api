@@ -16,6 +16,23 @@ const evi = realpathSync(join(root, ".evi")).replaceAll("\\", "/");
 const dir = mkdtempSync(join(tmpdir(), "mist-install-"));
 const problems: string[] = [];
 
+/** What Evi's build leaves out of a plugin's page bundle */
+const PAGE_EXTERNAL = ["@evi/api", "react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"];
+
+/** Bundles `entry` as Evi's build bundles a plugin: its code, and the dist modules of mist-api it carries */
+async function bundle(entry: string, target: "browser" | "node" = "browser") {
+    const built = await Bun.build({ entrypoints: [entry], target, format: "cjs", external: target === "browser" ? PAGE_EXTERNAL : ["electron"] });
+    if (!built.success) return { ok: false as const, error: built.logs.join("\n") };
+    const code = await built.outputs[0].text();
+    const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
+    return { ok: true as const, code, modules };
+}
+
+/** The first line of a failed child process's stderr that names an error */
+function firstError(err: unknown) {
+    return String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => /Error/.test(line)) ?? String(err);
+}
+
 try {
     execSync(`npm pack --ignore-scripts --pack-destination "${dir}"`, { cwd: root, stdio: "ignore" });
     const tarball = join(dir, `${pkg.name.replace(/^@/, "").replace("/", "-")}-${pkg.version}.tgz`);
@@ -114,7 +131,7 @@ electron.addWindow();
 console.log(JSON.stringify([run.ctx.settings.get("volume"), run.logs[0].args, electron.module.BrowserWindow.getAllWindows().length]));
 `], { cwd: app, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     } catch (err) {
-        tested = String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => line.startsWith("Error")) ?? String(err);
+        tested = firstError(err);
     }
     if (tested !== '[3,["found",1],1]') problems.push(`the testing subpath under Node printed ${tested}`);
 
@@ -129,7 +146,7 @@ import { defineNative, jsonFile, discordWindow } from "${name}/native";
 console.log([typeof defineNative, typeof jsonFile, typeof discordWindow].join(","));
 `], { cwd: app, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     } catch (err) {
-        partial = String((err as { stderr?: string; }).stderr).split(/\r?\n/).find(line => /Error/.test(line)) ?? String(err);
+        partial = firstError(err);
     }
     if (partial !== "function,function,function") problems.push(`the native subpath doesn't load next to an electron mock with only net: ${partial}`);
 
@@ -140,14 +157,10 @@ export const mist = createMist("tiny");
 export default mist.define({ async start() { await sleep(10); } });
 `);
     // As Evi's build bundles a plugin's page side
-    const built = await Bun.build({
-        entrypoints: [join(app, "plugin", "index.ts")], target: "browser", format: "cjs",
-        external: ["@evi/api", "react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
-    });
-    if (!built.success) problems.push(`bundling a plugin failed: ${built.logs.join("\n")}`);
+    const built = await bundle(join(app, "plugin", "index.ts"));
+    if (!built.ok) problems.push(`bundling a plugin failed: ${built.error}`);
     else {
-        const code = await built.outputs[0].text();
-        const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
+        const { code, modules } = built;
         for (const unused of ["native.js", "stores.js", "bus.js", "discord.js", "testing.js", "ui.js"]) if (modules.includes(unused)) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
         for (const unused of modules.filter(m => m.startsWith("ui/"))) problems.push(`the bundle carries ${unused}, which the plugin doesn't import`);
         // HttpError stays: mist.native rebuilds one thrown by the native side
@@ -164,11 +177,10 @@ import { ${subpath === "discord" ? "discord" : "messages"} } from "${name}/${sub
 export const mist = createMist("tiny");
 export default mist.define({ start() { ${use}; } });
 `);
-        const one = await Bun.build({ entrypoints: [entry], target: "browser", format: "cjs", external: ["@evi/api", "react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"] });
-        if (!one.success) problems.push(`bundling a plugin that uses ${subpath} failed: ${one.logs.join(" ")}`);
+        const one = await bundle(entry);
+        if (!one.ok) problems.push(`bundling a plugin that uses ${subpath} failed: ${one.error}`);
         else {
-            const code = await one.outputs[0].text();
-            const modules = [...code.matchAll(/^\/\/ \S*node_modules\/\S+\/dist\/(\S+)$/gm)].map(m => m[1]);
+            const { modules } = one;
             if (!modules.includes("permissions.js")) problems.push(`a plugin that uses ${subpath} lost permissions.js`);
             for (const unused of modules.filter(m => m.startsWith(other))) problems.push(`a plugin that uses only ${subpath} carries ${unused}`);
         }
@@ -179,10 +191,10 @@ import { defineNative } from "${name}/native";
 export default defineNative({ add: (a: number, b: number) => a + b });
 `);
     // As Evi's build bundles a plugin's native side. Evi's review flags programs, files and Electron in native.js.
-    const nativeBuilt = await Bun.build({ entrypoints: [join(app, "plugin", "native.ts")], target: "node", format: "cjs", external: ["electron"] });
-    if (!nativeBuilt.success) problems.push(`bundling a native side failed: ${nativeBuilt.logs.join(" ")}`);
+    const nativeBuilt = await bundle(join(app, "plugin", "native.ts"), "node");
+    if (!nativeBuilt.ok) problems.push(`bundling a native side failed: ${nativeBuilt.error}`);
     else {
-        const code = await nativeBuilt.outputs[0].text();
+        const { code } = nativeBuilt;
         for (const unused of ["child_process", "electron", "safeStorage", "function jsonFile"]) if (code.includes(unused)) problems.push(`the native bundle carries ${unused}, which a native side using only defineNative doesn't use`);
         if (!code.includes("function defineNative")) problems.push("the native bundle lost defineNative");
     }

@@ -15,8 +15,11 @@ const answer = JSON.parse(execSync("npm pack --dry-run --json --ignore-scripts",
 const packed = Array.isArray(answer) ? answer[0] : Object.values(answer)[0] as { filename: string; files: { path: string; }[]; };
 const files = new Set<string>(packed.files.map((f: { path: string; }) => f.path.replaceAll("\\", "/")));
 
-const targets = (value: unknown): string[] =>
-    typeof value === "string" ? [value] : value && typeof value === "object" ? Object.values(value).flatMap(targets) : [];
+function targets(value: unknown): string[] {
+    if (typeof value === "string") return [value];
+    if (value && typeof value === "object") return Object.values(value).flatMap(targets);
+    return [];
+}
 const wanted = [...new Set([...targets(pkg.exports), ...targets(pkg.bin), pkg.main, pkg.types, "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE"]
     .map((path: string) => path.replace(/^\.\//, "")))];
 

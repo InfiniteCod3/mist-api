@@ -3,7 +3,8 @@
  * (`__mist_requests`), and a hidden method it replies through (`__mist_reply`).
  */
 import { NativeError } from "./errors.ts";
-import { channelOf, type EventChannel, nativeEvents } from "./events.ts";
+import { assertClonable, createEventChannel } from "./events.ts";
+import { checkTimeout } from "./internal.ts";
 import type { EventsAnswer, ReplyOutcome, RequestEvent } from "./protocol.ts";
 import { isRecord } from "./util.ts";
 
@@ -24,10 +25,11 @@ export interface RequestOptions {
 /** Pass to defineNative as `requests`; the page answers with `mist.requests.handle` */
 export interface NativeRequests<R extends RequestMap<R>> {
     /**
-     * Asks the page and waits for its answer. The answer comes from the page, so it is untrusted
-     * input whatever R says: validate it. Rejects with a NativeError whose code is
-     * "request-timeout", "request-stopped", "request-unhandled" or "request-failed", or with the
-     * signal's reason.
+     * Asks the page and waits for its answer. The answer comes from the page: it is untrusted input
+     * whatever R says. Validate it. Rejects with a NativeError whose code is "request-timeout",
+     * "request-stopped", "request-unhandled" or "request-failed", or with the signal's reason.
+     * Throws a TypeError for a `timeoutMs` that isn't a number, a RangeError for one out of range,
+     * and a NativeError "unclonable" for a payload IPC can't carry.
      */
     request<K extends keyof R & string>(name: K, payload: Parameters<R[K]>[0], options?: RequestOptions): Promise<Awaited<ReturnType<R[K]>>>;
 }
@@ -53,16 +55,19 @@ function parseOutcome(outcome: unknown): ReplyOutcome | null {
     return null;
 }
 
+const stopped = (detail: string) => new NativeError("request-stopped", undefined, `request: ${detail}`);
+
 export function nativeRequests<R extends RequestMap<R>>({ timeoutMs = 30_000 }: NativeRequestsOptions = {}): NativeRequests<R> {
-    if (!(timeoutMs > 0)) throw new RangeError(`timeoutMs must be more than 0, got ${timeoutMs}`);
+    checkTimeout("nativeRequests", "timeoutMs", timeoutMs);
     const pending = new Map<string, Pending>();
-    const queue = nativeEvents<RequestEvent>({ replay: e => pending.has(e.id), live: e => pending.has(e.id) });
-    const channel = channelOf(queue) as EventChannel<RequestEvent>;
-    let stopped = false;
+    const { events: queue, channel } = createEventChannel<RequestEvent>({ replay: e => pending.has(e.id), live: e => pending.has(e.id) });
+    let running = true;
 
     const requests: NativeRequests<R> = {
         request(name, payload, { timeoutMs: wait = timeoutMs, signal } = {}) {
-            if (stopped) return Promise.reject(new NativeError("request-stopped", undefined, "The native side is stopped"));
+            checkTimeout("request", "timeoutMs", wait);
+            assertClonable("request", payload, `the ${name} request's payload`);
+            if (!running) return Promise.reject(stopped("the native side is stopped"));
             if (signal?.aborted) return Promise.reject(signal.reason);
             const id = crypto.randomUUID();
             return new Promise((resolve, reject) => {
@@ -77,7 +82,7 @@ export function nativeRequests<R extends RequestMap<R>>({ timeoutMs = 30_000 }: 
                 };
                 const timer = setTimeout(() => {
                     settle();
-                    reject(new NativeError("request-timeout", { name }, `The page didn't answer ${name} within ${wait} ms`));
+                    reject(new NativeError("request-timeout", { name }, `request: the page didn't answer ${name} within ${wait} ms`));
                 }, wait);
                 signal?.addEventListener("abort", onAbort, { once: true });
                 pending.set(id, {
@@ -101,12 +106,12 @@ export function nativeRequests<R extends RequestMap<R>>({ timeoutMs = 30_000 }: 
             return true;
         },
         start() {
-            stopped = false;
+            running = true;
             channel.start();
         },
         stop() {
-            stopped = true;
-            for (const waiting of [...pending.values()]) waiting.reject(new NativeError("request-stopped", undefined, "The native side stopped before the page answered"));
+            running = false;
+            for (const waiting of [...pending.values()]) waiting.reject(stopped("the native side stopped before the page answered"));
             channel.stop();
         },
     });

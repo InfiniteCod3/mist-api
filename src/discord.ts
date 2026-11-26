@@ -10,17 +10,20 @@ export {
 export { chat } from "./discord/chat.ts";
 export { type DurationOptions, type DurationStyle, format } from "./discord/format.ts";
 export { type MessageLink, parseMessageLink } from "./discord/links.ts";
-export { avatarUrl, type AvatarOwner, copy, navigate } from "./discord/page.ts";
+export { avatarUrl, type AvatarOwner, type ChannelTarget, copy, type Navigate, navigate } from "./discord/page.ts";
 export { type PermissionFlag, type PermissionKey, PluginPermissionError, UnknownPluginError } from "./permissions.ts";
 export { type ApiMessage, DiscordApiError, type MessagesOptions, type Rest, type RestOptions } from "./discord/rest.ts";
 export type { CustomStatus, SaveResult, SettingsProto, UpdateOptions } from "./discord/settings.ts";
+export { snowflake } from "./discord/snowflake.ts";
+export { displayName, type DisplayNameOptions, type NamedUser } from "./discord/users.ts";
 
 export interface DiscordApi {
     rest: Rest;
     messages(channelId: string, options?: MessagesOptions): AsyncGenerator<ApiMessage, void, undefined>;
-    /** The signed-in account's synced settings, written with Discord's own updater */
+    /** The signed-in account's synced settings, written with Discord's updater */
     settings: {
-        update(proto: SettingsProto, group: string, change: (value: any) => boolean | void, options?: UpdateOptions): Promise<SaveResult>;
+        /** `G` types the group's value for `change`; left out, it's untyped */
+        update<G = any>(proto: SettingsProto, group: string, change: (value: G) => boolean | void, options?: UpdateOptions): Promise<SaveResult>;
     };
     /** The signed-in account's custom status */
     status: {
@@ -30,10 +33,10 @@ export interface DiscordApi {
 }
 
 /**
- * Discord's own API client and settings updater, signed in as the current account, and paging over a
+ * Discord's API client and settings updater, signed in as the current account, and paging over a
  * channel's messages, for the plugin whose mist object this is: held to the `permissions` in its
- * manifest, as Evi holds its fetch. Throws a TypeError for anything but the plugin's own mist object,
- * after `mist.define`.
+ * manifest, as Evi holds its fetch. Throws a TypeError for anything but the mist object `createMist`
+ * made for the plugin.
  */
 export function discord(mist: Mist<any, any>): DiscordApi {
     const id = pluginOf(mist, "discord()");

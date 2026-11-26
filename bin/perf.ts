@@ -1,6 +1,7 @@
 /** mist perf: Evi's per-plugin time (Evi.perf.snapshot()), and patches that applied but never called into their plugin */
-import { evaluate, type Send } from "./cdp.ts";
-import { pageExpression } from "./page.ts";
+import type { Send } from "./cdp.ts";
+import { clip } from "./format.ts";
+import { type PageGlobal, pageCall } from "./page.ts";
 
 interface Totals { calls: number; ms: number; max: number; }
 export interface SiteReport extends Totals { kind: string; name: string; recent: Totals; }
@@ -16,44 +17,58 @@ export interface PerfReport {
     unreadable: number;
 }
 
+interface Diagnosis {
+    plugin: string;
+    index: number;
+    /** Whether Evi applied it; `health` can't say, as "ambiguous" covers both applied and waiting patches */
+    state: "pending" | "applied" | "partial" | "failed";
+    modules: string[];
+    patch: { find: unknown; replace: { with: unknown; } | { with: unknown; }[]; };
+}
+type PerfPage = PageGlobal<{ Evi: { perf: { snapshot(): PluginReport[]; }; diagnosePatches(): Diagnosis[]; stats?: Record<string, number>; }; }>;
+
 /** Page side. Reads only: Evi.perf.record would restart a recording the Performance tab may be making. */
 function perfPage(): PerfReport {
     const SELF = /\$self(?:\?\.|\.)([A-Za-z_$][\w$]*)/g;
-    const E = (globalThis as any).Evi;
-    const plugins: PluginReport[] = E.perf.snapshot();
+    const evi = (globalThis as PerfPage).Evi;
+    const plugins = evi.perf.snapshot();
     const called = new Map<string, number>();
-    for (const p of plugins) for (const s of p.sites) if (s.kind === "patch") called.set(`${p.plugin}\0${s.name}`, s.calls);
+    for (const plugin of plugins) {
+        for (const site of plugin.sites) if (site.kind === "patch") called.set(`${plugin.plugin}\0${site.name}`, site.calls);
+    }
     const unrun: Unrun[] = [];
     let unreadable = 0;
-    for (const p of E.diagnosePatches()) {
-        if (p.state !== "applied" && p.state !== "partial") continue;
+    for (const diagnosis of evi.diagnosePatches()) {
+        if (diagnosis.state !== "applied" && diagnosis.state !== "partial") continue;
         const names = new Set<string>();
-        for (const r of [p.patch.replace].flat()) {
-            if (typeof r.with === "string") for (const [, name] of r.with.matchAll(SELF)) names.add(name);
+        for (const replacement of [diagnosis.patch.replace].flat()) {
+            if (typeof replacement.with === "string") for (const [, name] of replacement.with.matchAll(SELF)) names.add(name);
             else unreadable++;
         }
-        if (names.size && [...names].every(name => !called.get(`${p.plugin}\0$self.${name}`))) {
-            unrun.push({ plugin: p.plugin, index: p.index, find: String(p.patch.find), names: [...names], modules: p.modules });
+        if (names.size && [...names].every(name => !called.get(`${diagnosis.plugin}\0$self.${name}`))) {
+            unrun.push({ plugin: diagnosis.plugin, index: diagnosis.index, find: String(diagnosis.patch.find), names: [...names], modules: diagnosis.modules });
         }
     }
-    return { plugins, stats: E.stats && typeof E.stats === "object" ? { ...E.stats } : null, unrun, unreadable };
+    return { plugins, stats: evi.stats && typeof evi.stats === "object" ? { ...evi.stats } : null, unrun, unreadable };
 }
 
-export const readPerf = (send: Send) => evaluate<PerfReport>(send, pageExpression(perfPage, []));
+export const readPerf = (send: Send) => pageCall(send, perfPage, []);
 
-const ms = (n: number) => n >= 100 ? `${Math.round(n)} ms` : `${n.toFixed(1)} ms`;
+const ms = (value: number) => value >= 100 ? `${Math.round(value)} ms` : `${value.toFixed(1)} ms`;
 
 export function perfLines({ plugins, stats, unrun, unreadable }: PerfReport, sites: number): string[] {
     const out: string[] = [];
     if (stats) out.push(`Evi on module loading: ${stats.modules} modules, ${stats.patchedModules} patched, patching ${ms(stats.patchMs)}, listeners ${ms(stats.listenerMs)}`);
     out.push(plugins.length ? `${plugins.length} plugins ran code, by time in the last 10 seconds, then since start` : "No plugin has run code that Evi measures.");
-    for (const p of plugins) {
-        out.push(`  ${p.plugin}  ${ms(p.ms)} in ${p.calls} calls, slowest ${ms(p.max)}  last 10 s: ${ms(p.recent.ms)} in ${p.recent.calls}`);
-        for (const s of p.sites.slice(0, sites)) out.push(`    ${s.kind.padEnd(7)} ${s.name}  ${ms(s.ms)} in ${s.calls}, slowest ${ms(s.max)}`);
-        if (p.sites.length > sites) out.push(`    … ${p.sites.length - sites} more sites (--all shows each)`);
+    for (const plugin of plugins) {
+        out.push(`  ${plugin.plugin}  ${ms(plugin.ms)} in ${plugin.calls} calls, slowest ${ms(plugin.max)}  last 10 s: ${ms(plugin.recent.ms)} in ${plugin.recent.calls}`);
+        for (const site of plugin.sites.slice(0, sites)) out.push(`    ${site.kind.padEnd(7)} ${site.name}  ${ms(site.ms)} in ${site.calls}, slowest ${ms(site.max)}`);
+        if (plugin.sites.length > sites) out.push(`    … ${plugin.sites.length - sites} more sites (--all shows each)`);
     }
     out.push(unrun.length ? `${unrun.length} applied patches whose $self functions haven't run: their code may wait on a screen not opened yet, or never runs` : "Every applied patch that names $self functions has called one.");
-    for (const u of unrun) out.push(`  ${u.plugin} #${u.index} find ${u.find.length > 80 ? `${u.find.slice(0, 80)}…` : u.find}  modules ${u.modules.join(",") || "none"}  never called: ${u.names.map(n => `$self.${n}`).join(", ")}`);
-    if (unreadable) out.push(`${unreadable} replacements are functions, so their $self names can't be read`);
+    for (const patch of unrun) {
+        out.push(`  ${patch.plugin} #${patch.index} find ${clip(patch.find, 80)}  modules ${patch.modules.join(",") || "none"}  never called: ${patch.names.map(name => `$self.${name}`).join(", ")}`);
+    }
+    if (unreadable) out.push(`${unreadable} replacements are functions: their $self names can't be read`);
     return out;
 }

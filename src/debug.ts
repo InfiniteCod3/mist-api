@@ -5,7 +5,8 @@
  */
 import type { PluginContext } from "@evi/api";
 
-import { type CallRecord, errorMessage, HIDDEN, type LogRecord, MIST_VERSION, type NativeLogs, type ReducedNativeLogs, type Shown } from "./protocol.ts";
+import { errorMessage } from "./internal.ts";
+import { type CallRecord, HIDDEN, type LogRecord, MIST_VERSION, type NativeLogs, type ReducedNativeLogs, type Shown } from "./protocol.ts";
 import type { Recorder } from "./recorder.ts";
 import type { HandleState, MistHandle, NativeKind } from "./registry.ts";
 import { describe, type Reduced, type Snapshot } from "./values.ts";
@@ -55,7 +56,7 @@ export interface Debug {
 /**
  * What a handle is made from. Its private field is how a debugger finds the capability: CDP's
  * Runtime.getProperties lists an object's private fields, and no page code can read them or put the
- * real capability into one of its own objects.
+ * real capability into an object it makes.
  */
 class Sealed {
     readonly #capability: MistCapability;
@@ -116,11 +117,12 @@ export function createDebug(source: DebugSource): Debug {
         return full ? all : Object.fromEntries(Object.entries(all).map(([k, v]) => [k, describe(v)]));
     }
 
-    async function nativeLogs<L extends NativeLogs>(n: number | undefined, full: boolean): Promise<L | null> {
+    /** `whole` asks for whole records, which come only once the probe says main has a debugging port */
+    async function nativeLogs<L extends NativeLogs>(n: number | undefined, whole: boolean): Promise<L | null> {
         const context = source.context();
         const known = context ? await probe(context) : gate;
         if (known.kind !== "mist" || !context) return null;
-        return await context.native.call<L>(HIDDEN.logs, n, full);
+        return await context.native.call<L>(HIDDEN.logs, n, whole && open());
     }
 
     const capability: MistCapability = Object.freeze({
@@ -128,10 +130,10 @@ export function createDebug(source: DebugSource): Debug {
         mistVersion: MIST_VERSION,
         open,
         // Only a CDP client reaches the capability, and CDP reads the page's heap anyway: the gate
-        // covers what the page doesn't hold, native calls and the native side's own records
+        // covers what the page doesn't hold, native calls and the native side's records
         logs: (n?: number) => recorder.logs(n, true),
         calls: (n?: number) => recorder.calls(n, true),
-        nativeLogs: (n?: number) => nativeLogs(n, open()),
+        nativeLogs: (n?: number) => nativeLogs(n, true),
         values: () => values(true),
         settings: () => settings(true),
         async call(method: string, ...args: unknown[]): Promise<Shown> {
@@ -139,7 +141,7 @@ export function createDebug(source: DebugSource): Debug {
             if (!context) throw new Error(`${id} isn't running`);
             const known = await probe(context);
             if (known.kind === "none") throw new Error(`${id} has no native module`);
-            if (known.kind !== "mist") throw new Error(`${id}'s native module doesn't use defineNative, so mist can't tell whether main has a debugging port`);
+            if (known.kind !== "mist") throw new Error(`${id}'s native module doesn't use defineNative; mist can't check main's debugging port`);
             if (!known.debug) throw new Error("Discord's main process wasn't started with --remote-debugging-port");
             return recorder.snapshot(await source.callNative(method, args));
         },

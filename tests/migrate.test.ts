@@ -74,9 +74,12 @@ test("a migration that throws is logged and in status, the steps after it wait, 
     expect(Mist.get("t-migrate-throws").state().warnings).toEqual([]);
 });
 
-test("define refuses migrations without a whole `to` of their own", () => {
+test("define refuses a migration whose `to` isn't a distinct whole number from 1", () => {
     const mist = createMist("t-migrate-bad");
-    expect(() => mist.define({ migrate: [{ to: 1, run() { } }, { to: 1, run() { } }] })).toThrow(/its own whole `to`/);
-    expect(() => mist.define({ migrate: [{ to: 1.5, run() { } }] })).toThrow(/1\.5/);
-    expect(() => mist.define({ migrate: [{ to: 0, run() { } }] })).toThrow(/not 0/);
+    expect(() => mist.define({ migrate: [{ to: 1, run() { } }, { to: 1, run() { } }] })).toThrow(/must be distinct, got 1 twice/);
+    expect(() => mist.define({ migrate: [{ to: 1.5, run() { } }] })).toThrow(RangeError);
+    expect(() => mist.define({ migrate: [{ to: 1.5, run() { } }] })).toThrow("mist.define: migration to must be a whole number from 1, got 1.5");
+    expect(() => mist.define({ migrate: [{ to: 0, run() { } }] })).toThrow(/got 0/);
+    // Not a number is a TypeError, not a RangeError
+    expect(() => mist.define({ migrate: [{ to: "2" as never, run() { } }] })).toThrow(TypeError);
 });

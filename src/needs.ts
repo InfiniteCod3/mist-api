@@ -1,3 +1,4 @@
+import { checkNumber, shownValue } from "./internal.ts";
 import type { EviDebug, Registry } from "./registry.ts";
 
 /** Bus protocols a plugin provides, each at one version, as in `{ "weather-feed": 2 }` */
@@ -24,7 +25,8 @@ export interface Mismatch {
 
 export function checkProvides(provides: Provides) {
     for (const [protocol, version] of Object.entries(provides)) {
-        if (!protocol || !Number.isInteger(version) || version < 1) throw new Error(`mist: provides needs a protocol name and a whole version from 1 (${protocol}: ${version})`);
+        if (!protocol) throw new TypeError("createMist: provides needs a protocol name, got an empty one");
+        checkNumber("createMist", `provides[${shownValue(protocol)}]`, version, { min: 1, integer: true });
     }
 }
 

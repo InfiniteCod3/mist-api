@@ -127,5 +127,8 @@ test("the handle and its state advertise what the plugin provides, and a bad ver
     expect(handle.provides).toEqual({ "weather-feed": 2 });
     expect(Object.isFrozen(handle.provides)).toBe(true);
     expect(handle.state().provides).toEqual({ "weather-feed": 2 });
-    expect(() => createMist("t-provides-bad", { provides: { "weather-feed": 0 } })).toThrow(/whole version/);
+    expect(() => createMist("t-provides-bad", { provides: { "weather-feed": 0 } })).toThrow(RangeError);
+    expect(() => createMist("t-provides-bad", { provides: { "weather-feed": 0 } })).toThrow('createMist: provides["weather-feed"] must be a whole number from 1, got 0');
+    expect(() => createMist("t-provides-bad", { provides: { "weather-feed": "2" as never } })).toThrow(TypeError);
+    expect(() => createMist("t-provides-bad", { provides: { "weather-feed": 2n as never } })).toThrow('createMist: provides["weather-feed"] must be a number, got 2n');
 });

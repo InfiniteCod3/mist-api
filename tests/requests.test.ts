@@ -150,3 +150,19 @@ test("a page handling requests from a native side made without them stops pollin
     expect(await mist.native.ping()).toBe("pong");
     run.dispose();
 });
+
+test("a payload IPC can't clone, or a bad timeoutMs, throws before the request is queued, and later requests still go through", async () => {
+    const { module, requests } = await asking();
+    const withCallback = { allowAlpha: false, onPick: () => { } } as { allowAlpha: boolean; };
+    expect(() => requests.request("pickColor", withCallback)).toThrow(expect.objectContaining({ name: "NativeError", code: "unclonable" }));
+    // Not a number is a TypeError; a number out of (0, 2^31 - 1] a RangeError
+    for (const bad of [NaN, "100", null]) expect(() => requests.request("confirm", "x", { timeoutMs: bad as number })).toThrow(TypeError);
+    for (const bad of [0, -5, Infinity, 2 ** 31]) expect(() => requests.request("confirm", "x", { timeoutMs: bad })).toThrow(RangeError);
+    expect(() => requests.request("confirm", "x", { timeoutMs: 2 ** 31 })).toThrow("request: timeoutMs must be a finite number above 0 to 2147483647, got 2147483648");
+    expect((await module.__mist_requests(null, 0))?.events).toEqual([]);
+
+    const { mist, run } = page<typeof module>("t-unclonable", module);
+    mist.requests.handle("confirm", () => true);
+    expect(await module.ask("still there?")).toBe(true);
+    run.dispose();
+});

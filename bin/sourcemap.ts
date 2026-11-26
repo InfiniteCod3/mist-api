@@ -34,7 +34,7 @@ function decodeLine(line: string, state: number[]): Segment[] {
     return out;
 }
 
-export function decodeMappings(mappings: string): Segment[][] {
+function decodeMappings(mappings: string): Segment[][] {
     const state = [0, 0, 0, 0, 0];
     return mappings.split(";").map(line => decodeLine(line, state));
 }
@@ -61,9 +61,9 @@ export function mapper(map: SourceMap): Mapper {
         const segments = lines[line];
         if (!segments?.length) return null;
         let found: Segment | undefined;
-        for (const s of segments) {
-            if (s[0] > column) break;
-            found = s;
+        for (const segment of segments) {
+            if (segment[0] > column) break;
+            found = segment;
         }
         if (!found) return null;
         return {

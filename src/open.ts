@@ -1,11 +1,11 @@
 /** Opening a login window in a private session, and links in the user's browser. */
-// A namespace import: a plugin's tests can mock electron with only the parts they use, and a named
-// import of a part the mock lacks would fail to link before any of mist runs
 import * as electron from "electron";
 import type { BrowserWindow, Session } from "electron";
 
 import { check } from "./check.ts";
-import type { PrivateSession } from "./session.ts";
+import { checkNumber, checkTimeout, shownValue } from "./internal.ts";
+import { log } from "./native-log.ts";
+import { migrated, type PrivateSession } from "./session.ts";
 import { discordWindow } from "./window.ts";
 
 export interface LoginWindowOptions {
@@ -15,7 +15,7 @@ export interface LoginWindowOptions {
     done(url: string): boolean | Promise<boolean>;
     /** Closes the window: the promise resolves false */
     signal?: AbortSignal;
-    /** The window's title, which the page can't change. Default the page's own */
+    /** The window's title, which the page can't change. Default the page's title */
     title?: string;
     /** Default 480 */
     width?: number;
@@ -45,8 +45,11 @@ const isHttps = (url: string) => {
 export function loginWindow(ses: PrivateSession | Session, options: LoginWindowOptions): Promise<boolean> {
     const session = "partition" in ses ? ses.session : ses;
     const { url, done, signal, title, width = 480, height = 720, pollMs = 1000 } = options;
-    if (!isHttps(url)) throw new TypeError(`A login window opens an https page, got ${JSON.stringify(url)}`);
-    if (typeof done !== "function") throw new TypeError("loginWindow needs options.done, which answers true once the login is done");
+    if (!isHttps(url)) throw new TypeError(`loginWindow: url must be an https page, got ${shownValue(url)}`);
+    if (typeof done !== "function") throw new TypeError("loginWindow: options.done must be a function that answers true once the login is done");
+    checkNumber("loginWindow", "width", width, { min: 1, integer: true });
+    checkNumber("loginWindow", "height", height, { min: 1, integer: true });
+    checkTimeout("loginWindow", "pollMs", pollMs);
 
     const known = open.get(session);
     if (known && !known.win.isDestroyed()) {
@@ -68,15 +71,14 @@ export function loginWindow(ses: PrivateSession | Session, options: LoginWindowO
     win.once("ready-to-show", () => win.show());
     const contents = win.webContents;
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
-    // Electron before 25 passes the URL as a second argument, not on the event
-    const httpsOnly = (event: { url?: string; preventDefault(): void; }, url?: string) => {
-        if (!isHttps(event.url ?? url ?? "")) event.preventDefault();
+    const httpsOnly = (event: { url: string; preventDefault(): void; }) => {
+        if (!isHttps(event.url)) event.preventDefault();
     };
     contents.on("will-navigate", httpsOnly);
     contents.on("will-redirect", httpsOnly);
 
     const finished = new Promise<boolean>(resolve => {
-        let settled = false, asking = false, again = false;
+        let settled = false, asking = false, again = false, logged = false;
         const finish = async (ok: boolean) => {
             if (settled) return;
             settled = true;
@@ -87,7 +89,7 @@ export function loginWindow(ses: PrivateSession | Session, options: LoginWindowO
             await session.cookies.flushStore().catch(() => { });
             resolve(ok);
         };
-        // A navigation while `done` is still answering asks again after it, so the last page is never missed
+        // A navigation while `done` is still answering asks again after it: the last page is never missed
         const ask = async () => {
             if (settled) return;
             if (asking) return void (again = true);
@@ -98,8 +100,10 @@ export function loginWindow(ses: PrivateSession | Session, options: LoginWindowO
                     if (win.isDestroyed()) return;
                     if (await done(contents.getURL())) return void finish(true);
                 } while (again && !settled);
-            } catch {
-                // A check that fails is asked again at the next navigation or poll
+            } catch (err) {
+                // Asked again at the next navigation or poll; logged once, as it may throw on every page
+                if (!logged) log.error("loginWindow's done threw:", err);
+                logged = true;
             } finally {
                 asking = false;
             }
@@ -112,7 +116,7 @@ export function loginWindow(ses: PrivateSession | Session, options: LoginWindowO
         signal?.addEventListener("abort", onAbort, { once: true });
     });
     open.set(session, { win, done: finished });
-    win.loadURL(url).catch(() => { });
+    migrated(session).then(() => win.isDestroyed() ? undefined : win.loadURL(url)).catch(() => { });
     return finished;
 }
 
@@ -123,7 +127,7 @@ export interface OpenExternalOptions {
 
 /**
  * Opens an https link in the user's browser with Electron's shell. Anything else, or a host outside
- * `hosts`, throws a NativeError "bad-argument", so a link from the page can't open a program or file.
+ * `hosts`, throws a NativeError "bad-argument": a link from the page can't open a program or file.
  */
 export async function openExternal(url: unknown, { hosts }: OpenExternalOptions = {}): Promise<void> {
     await electron.shell.openExternal(check.https(url, { hosts, name: "url" }).href);

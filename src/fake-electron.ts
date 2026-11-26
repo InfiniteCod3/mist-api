@@ -134,7 +134,7 @@ export interface FakeElectronModule {
         showSaveDialog(parentOrOptions: unknown, options?: unknown): Promise<{ canceled: boolean; filePath: string; }>;
         showMessageBox(parentOrOptions: unknown, options?: unknown): Promise<{ response: number; checkboxChecked: boolean; }>;
     };
-    /** Not encryption: a reversible stand-in, so code that stores secrets can be tested */
+    /** Not encryption: a reversible stand-in for testing code that stores secrets */
     safeStorage: {
         isEncryptionAvailable(): boolean;
         getSelectedStorageBackend(): string;
@@ -157,7 +157,7 @@ export interface FakeElectron {
     readonly module: FakeElectronModule;
     /** Every window, from addWindow and `new BrowserWindow`, destroyed ones too, oldest first */
     readonly windows: FakeBrowserWindow[];
-    /** Adds a window that is already open, such as Discord's own at `https://discord.com/app` */
+    /** Adds a window that is already open, such as Discord's main window at `https://discord.com/app` */
     addWindow(options?: { url?: string; bounds?: Partial<Rect>; }): FakeBrowserWindow;
     /** Answers every session's fetch */
     fetch: (url: string, init: RequestInit | undefined, partition: string) => Response | Promise<Response>;
@@ -183,7 +183,7 @@ export interface FakeElectron {
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9200 Chrome/138.0.7204.251 Electron/37.10.3 Safari/537.36";
 
-/** Object.assign that keeps getters as getters, so a fake's `flushes` or `menuRemoved` stays live */
+/** Object.assign that keeps getters as getters: a fake's `flushes` or `menuRemoved` stays live */
 function extend<T extends object, U extends object>(target: T, source: U): T & U {
     return Object.defineProperties(target, Object.getOwnPropertyDescriptors(source)) as T & U;
 }
@@ -196,8 +196,8 @@ function domainMatches(host: string, cookie: FakeCookie) {
 
 /** A cookie's domain is `domain` or under it, as Electron's `domain` filter takes it */
 function underDomain(cookie: FakeCookie, domain: string) {
-    const own = cookie.domain.replace(/^\./, ""), wanted = domain.replace(/^\./, "");
-    return own === wanted || own.endsWith(`.${wanted}`);
+    const have = cookie.domain.replace(/^\./, ""), wanted = domain.replace(/^\./, "");
+    return have === wanted || have.endsWith(`.${wanted}`);
 }
 
 function cookieJar(): { cookies: FakeCookies; clear(): void; } {
@@ -274,7 +274,8 @@ export function fakeElectron(options: FakeElectronOptions = {}): FakeElectron {
     let nextId = 1;
     let focused: FakeBrowserWindow | null = null;
 
-    function makeWindow(windowOptions: Record<string, any>, url = ""): FakeBrowserWindow {
+    /** Gives a new window its state and methods as properties of the window itself: getters like `menuRemoved` stay live */
+    function dress(target: EventEmitter, windowOptions: Record<string, any>, url: string) {
         const id = nextId++;
         let current = url, destroyed = false, visible = windowOptions.show !== false, minimized = false, menuRemoved = false, muted = false, readyShown = false;
         let title = typeof windowOptions.title === "string" ? windowOptions.title : "";
@@ -293,7 +294,7 @@ export function fakeElectron(options: FakeElectronOptions = {}): FakeElectron {
             setAudioMuted: (value: boolean) => void (muted = value),
             isAudioMuted: () => muted,
         });
-        const win: FakeBrowserWindow = extend(new EventEmitter(), {
+        const win: FakeBrowserWindow = extend(target, {
             id,
             options: windowOptions,
             webContents: contents,
@@ -349,15 +350,21 @@ export function fakeElectron(options: FakeElectronOptions = {}): FakeElectron {
             flashFrame() { },
         });
         windows.push(win);
-        return win;
     }
 
-    const BrowserWindow = function (windowOptions: Record<string, any> = {}) {
-        return makeWindow(windowOptions);
-    } as unknown as FakeBrowserWindowClass;
-    BrowserWindow.getAllWindows = () => windows.filter(w => !w.isDestroyed());
-    BrowserWindow.fromId = id => windows.find(w => w.id === id && !w.isDestroyed()) ?? null;
-    BrowserWindow.getFocusedWindow = () => focused && !focused.isDestroyed() ? focused : null;
+    // A class: `win instanceof BrowserWindow` holds as with Electron's
+    interface BrowserWindow extends FakeBrowserWindow { }
+    class BrowserWindow extends EventEmitter {
+        static getAllWindows = () => windows.filter(w => !w.isDestroyed());
+        static fromId = (id: number) => windows.find(w => w.id === id && !w.isDestroyed()) ?? null;
+        static getFocusedWindow = () => focused && !focused.isDestroyed() ? focused : null;
+
+        /** `url` is where a window from addWindow already is; Electron's constructor takes only options */
+        constructor(windowOptions: Record<string, any> = {}, url = "") {
+            super();
+            dress(this, windowOptions, url);
+        }
+    }
 
     function makeSession(partition: string): FakeSession {
         const { cookies, clear } = cookieJar();
@@ -416,7 +423,7 @@ export function fakeElectron(options: FakeElectronOptions = {}): FakeElectron {
         storageBackend: "gnome_libsecret",
         fetch: options.fetch ?? (() => new Response("", { status: 404 })),
         addWindow({ url = "https://discord.com/app", bounds = {} } = {}) {
-            return makeWindow({ ...bounds }, url);
+            return new BrowserWindow({ ...bounds }, url);
         },
         reset() {
             for (const win of windows.splice(0)) win.destroy();

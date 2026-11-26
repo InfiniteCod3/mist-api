@@ -1,6 +1,6 @@
 # Migrate a plugin to mist-api
 
-This guide moves an existing Evi plugin onto mist-api, one change at a time. Each step leaves the plugin working, so you can typecheck and run it between steps. The examples use Weather Bar, an invented plugin that shows the weather for a city. Its native side asks a weather service, and its page side shows the answer. The examples show only the lines that change.
+This guide moves an existing Evi plugin onto mist-api, one change at a time. Each step leaves the plugin working: you can typecheck and run it between steps. The examples use Weather Bar, an invented plugin that shows the weather for a city. Its native side asks a weather service, and its page side shows the answer. The examples show only the lines that change.
 
 Before you start, install mist-api into `userplugins/node_modules` as the [README](../README.md#install) shows.
 
@@ -139,7 +139,7 @@ To type the calls:
 
 mist-api records each native call's arguments for `mist calls` and `mist native-logs`. With Discord's debugging port on, the CLI shows them whole. Fields named like secrets are masked, such as `token`, `password`, `cookie`, and `session`. [createMist](core.md#mistoptions) lists the full set.
 
-Name the field that carries a secret so a built-in name matches it. Weather Bar sends its key as `apiKey`, which matches the built-in `api_key` name, so it is masked on both sides with no options. The setting of the same name is masked in `mist values` for the same reason.
+Name the field that carries a secret so a built-in name matches it. Weather Bar sends its key as `apiKey`, which matches the built-in `api_key` name. It is masked on both sides with no options. The setting of the same name is masked in `mist values` for the same reason.
 
 When a field name can't change, add it to `secrets` on both sides, because the page side and the native side record separately:
 
@@ -191,7 +191,7 @@ A `log` line written before `defineNative` runs, such as one at module load, is 
 
 ## 4. Replace hand-written store hooks and interfaces
 
-Plugins often carry their own store types and a store hook:
+Plugins often carry hand-written store types and a store hook:
 
 ```ts
 interface FluxStore {
@@ -225,17 +225,17 @@ function Account() {
 - It caches the getter's value until a store or a dep changes. A getter that returns a new object or array each time doesn't cause a render loop.
 - It takes `deps`, like `useMemo`. If the getter reads a prop or state, list it, as in `useStore(stores.user, () => stores.user?.getUser(id), [id])`.
 
-`stores` covers `UserStore`, `ChannelStore`, `GuildStore`, `SelectedChannelStore`, `MultiAccountStore`, `PresenceStore`, `SessionsStore`, and `StreamerModeStore`. For any other store, keep `findStore` and extend `FluxStore`:
+`stores` covers 14 common Discord stores ([Stores](stores.md#stores) lists them). For any other store, extend `FluxStore` and read it with `store`:
 
 ```ts
+import { type FluxStore, store, useStore } from "@aurologic/mist-api/stores";
+
 interface TypingStore extends FluxStore {
 	getTypingUsers(channelId: string): Record<string, number>;
 }
 
-const typingStore = () => findStore<TypingStore>("TypingStore");
-
 function Typing({ channelId }: { channelId: string; }) {
-	const count = useStore(typingStore(), () => Object.keys(typingStore()?.getTypingUsers(channelId) ?? {}).length, [channelId]);
+	const count = useStore("TypingStore", () => Object.keys(store<TypingStore>("TypingStore")?.getTypingUsers(channelId) ?? {}).length, [channelId]);
 	return <span>{count} typing</span>;
 }
 ```
@@ -255,13 +255,13 @@ function Typing({ channelId }: { channelId: string; }) {
 | A `Map` of `{ until, value }` entries trimmed by hand | `ttlCache({ ttlMs, max })` |
 | A queue and a running count | `limit(n)` |
 
-If `native.ts` defines its own `sleep`, delete it and import `sleep` from `@aurologic/mist-api/util`.
+If `native.ts` defines a `sleep`, delete it and import `sleep` from `@aurologic/mist-api/util`.
 
 `fetchWithTimeout` and `fetchJson` call the global `fetch`. In `native.ts`, keep Electron's `net.fetch` where you need Chromium's network stack or a session's cookies. A plain `fetch` without a timeout gets one from `fetchJson`.
 
-`HttpError` keeps the `"HTTP <status>"` message, so a check like `message === "HTTP 401"` on the error keeps working on the native side.
+`HttpError` keeps the `"HTTP <status>"` message. A check like `message === "HTTP 401"` on the error keeps working on the native side.
 
-Read `DiscordNative` where you use the bridge. Don't keep it in a module-level constant, because Evi can load a plugin before Discord's preload exposes it. Keep the `DiscordNative.x` access in your own code, so Evi's store review still lists what the plugin uses.
+Read `DiscordNative` where you use the bridge. Don't keep it in a module-level constant, because Evi can load a plugin before Discord's preload exposes it. Keep the `DiscordNative.x` access in the plugin's code, where Evi's store review still lists what the plugin uses.
 
 ## 6. Replace Symbol.for buses with @aurologic/mist-api/bus
 
@@ -285,15 +285,15 @@ current.publish(forecast);
 off();
 ```
 
-The version is part of the key. When the shape of `Forecast` changes, raise it to 2, so plugins that expect the first shape never get the new one. A listener that throws doesn't stop the other listeners.
+The version is part of the key. When the shape of `Forecast` changes, raise it to 2. Plugins that expect the first shape then never get the new one. A listener that throws doesn't stop the other listeners.
 
 For one shared value, such as an API object that a plugin offers while it runs, use a `slot` and release it on stop. A late release from an old copy doesn't clear the value a newer copy set. [Bus](bus.md#slot) shows the pattern.
 
-The bus uses its own keys, `mist-api.bus/channel/<name>@<version>`. A plugin that keeps a hand-made `Symbol.for` key doesn't hear the new channel, so move every plugin that shares a bus in the same change.
+The bus keys its state as `mist-api.bus/channel/<name>@<version>`. A plugin that keeps a hand-made `Symbol.for` key doesn't hear the new channel. Move every plugin that shares a bus in the same change.
 
 ## 7. Replace a hand-written long poll with mist.events
 
-A native side can't push to the page, so a plugin that reports changes from main often has the page poll in a loop:
+A native side can't push to the page. A plugin that reports changes from main often has the page poll in a loop:
 
 ```ts
 // index.tsx
@@ -349,6 +349,29 @@ else if (result === "failed") toast("Couldn't switch");
 It still throws for an id that isn't a Discord id, and when Discord's switch function can't be found.
 
 A hand-written module mock of `electron` in a native side's tests can move to `fakeElectron` from `@aurologic/mist-api/testing`. See [Testing](testing.md#mock-electron).
+
+## Upgrade from mist-api 0.4 to 0.5
+
+Most plugins need no change. Check the plugin for each of these:
+
+| If the plugin | Then |
+| --- | --- |
+| Reads messages with `api.rest.get` (such as `/channels/<id>/messages` or `/pins`) or `POST /channels/<id>/post-data` | Declare `readMessages` in its manifest, or the call throws a `PluginPermissionError`. |
+| Has a `privateSession` | Nothing. Its partition is now `persist:mist:<plugin id>:<name>`. The first call moves the old partition's cookies one at a time and the user stays signed in, as [Logins from before 0.5](toolkit.md#logins-from-before-05) describes. A test that reads `electron.sessions` by the old name needs the new one. |
+| Runs a `.cmd` or `.bat` file with `run` or `lifetime().spawn` | It failed with `EINVAL` before and now throws `needs-shell`. Run `cmd.exe` with `["/d", "/s", "/c", file, ...args]`, as [run](toolkit.md#run) shows. |
+| Pushes an event or sends a request with a function, a DOM node, or another value IPC can't copy | `push` and `request` now throw `unclonable` at once. Send plain data. |
+| Compares the reason of `lifetime().signal` or `accounts.scope`'s signal with an `Error` | It is now a `DOMException` named `AbortError`. |
+| Calls `api.rest` or `navigate` with a `.` or `..` path segment or a raw control character | Both now throw a `TypeError`. |
+| Relies on a `beforeSend` or `beforeEdit` listener's changes when it throws or times out | Those changes are now dropped. Finish every change before the listener can fail. |
+| Waits for `settings.update` to reload Discord's settings after a timeout | A timeout still resolves `"failed"`, and no longer reloads. Reload only if you need to. |
+| Passes `mist` an option it doesn't know, in a script | `mist` now refuses it. Put `--` before an argument that starts with `-`. |
+| Parses `mist status` or `mist calls` text output for `WARNING:` or `FAILED` | `mist status` now prints `concern:` and `mist calls` prints `failed`. |
+| Reads `error` from `mist react --json` | Read `problem`. |
+| Imports the `Channel` type from `@aurologic/mist-api/bus` | Import `BusChannel`. `channel()` returns the same object. |
+| Matches the text of a bus error, such as `mist bus: bad name or version` | Bus errors are now a `TypeError` or `RangeError` that start with `channel:` or `slot:`. [Bus](bus.md#how-copies-share-state) lists them. |
+| Parses `mist` output with `--json` and reads errors from stderr | With `--json`, an error is `{"error": "..."}` on stdout. |
+
+`discord(mist)` and the UI registries now work at module level, right after `createMist`. A plugin that called them in `start` only to wait for `mist.define` can move them up. Code that guards a toast or a settings read with `mist.running &&` can use `mist.toast` and `mist.settings`, which are safe between runs. [Core](core.md#mistsettings) describes them.
 
 ## Check the migration
 

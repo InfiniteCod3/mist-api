@@ -1,9 +1,8 @@
 import type { SourcePatch } from "@evi/api";
 
 import { onDemand } from "../patches.ts";
-import type { Channel } from "../stores.ts";
-import type { Message } from "./registries.ts";
-import { entryOwner, insertOnce, logOnce, type MistOwner, type Owned, shared, uiRef } from "./shared.ts";
+import type { Channel, Message } from "../stores.ts";
+import { byKey, entryOwner, insertOnce, logOnce, type MistOwner, type Owned, uiRef, uiState } from "./shared.ts";
 
 /** A message about to be sent. Change `content` to change what's sent. */
 export interface SendDraft {
@@ -33,7 +32,7 @@ interface OutgoingState {
     readonly send: Map<string, Hook<SendDraft>>;
     readonly edit: Map<string, Hook<EditDraft>>;
     /**
-     * What the patched send and edit call. False at once with no listeners, so a plain send isn't
+     * What the patched send and edit call. False at once with no listeners, and a plain send isn't
      * delayed; otherwise a promise of whether a listener cancelled.
      */
     beforeSend(draft: SendDraft): false | Promise<boolean>;
@@ -55,31 +54,33 @@ function settle(result: Verdict | Promise<Verdict>): Verdict | Promise<Verdict |
     return Promise.race([result, late]).finally(() => clearTimeout(timer));
 }
 
-/** Listeners in key order, one at a time. A listener that throws or takes too long is logged and skipped. */
+/**
+ * Listeners in key order, one at a time. Each gets a fresh copy of the draft, and its content is
+ * taken only once the listener settles in time: one that throws or times out is logged and skipped,
+ * and can't change the message later, when it finishes in the background.
+ */
 async function run<D extends SendDraft>(hooks: Map<string, Hook<D>>, draft: D): Promise<boolean> {
-    for (const hook of [...hooks.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0)) {
-        const before = draft.content;
+    for (const hook of [...hooks.values()].sort(byKey)) {
+        const copy = { ...draft };
+        let verdict: Verdict | typeof TIMED_OUT;
         try {
-            const verdict = await settle(hook.listener(draft));
-            if (verdict === TIMED_OUT) {
-                draft.content = before;
-                logOnce(hook.owner.log, `${hook.key} didn't finish within ${LISTENER_TIMEOUT_MS / 1000} s; the message goes on without it`, new Error("timed out"));
-                continue;
-            }
-            if (typeof draft.content !== "string") {
-                draft.content = before;
-                logOnce(hook.owner.log, `${hook.key} set the message's content to something other than a string; keeping the content it had`, new TypeError(typeof draft.content));
-            }
-            if (verdict?.cancel) return true;
+            verdict = await settle(hook.listener(copy));
         } catch (err) {
-            if (typeof draft.content !== "string") draft.content = before;
-            logOnce(hook.owner.log, `${hook.key} threw before a message went out; the message goes on`, err);
+            logOnce(hook.owner.log, `${hook.key} threw before a message went out; the message goes on without its changes`, err);
+            continue;
         }
+        if (verdict === TIMED_OUT) {
+            logOnce(hook.owner.log, `${hook.key} didn't finish within ${LISTENER_TIMEOUT_MS / 1000} s; the message goes on without it`);
+            continue;
+        }
+        if (typeof copy.content === "string") draft.content = copy.content;
+        else logOnce(hook.owner.log, `${hook.key} set the message's content to something other than a string; keeping the content it had`);
+        if (verdict?.cancel) return true;
     }
     return false;
 }
 
-const outgoing = () => shared<OutgoingState>(OUTGOING, () => {
+const outgoing = () => uiState<OutgoingState>(OUTGOING, () => {
     const state: Omit<OutgoingState, "beforeSend" | "beforeEdit"> = { protocol: 1, send: new Map(), edit: new Map() };
     return Object.assign(state, {
         beforeSend: (draft: SendDraft) => state.send.size > 0 && run(state.send, draft),
@@ -87,8 +88,9 @@ const outgoing = () => shared<OutgoingState>(OUTGOING, () => {
     });
 }, s => s.send instanceof Map && s.edit instanceof Map);
 
-function addHook<D>(hooks: Map<string, Hook<D>>, by: Owned, id: string, listener: Listener<D>) {
-    if (!id) throw new Error("mist ui: a message hook needs an id");
+function addHook<D>(fn: string, hooks: Map<string, Hook<D>>, mist: MistOwner, id: string, listener: Listener<D>) {
+    const by = entryOwner(mist, fn, { reads: true });
+    if (!id) throw new TypeError(`${fn}: id must be a non-empty string`);
     const hook: Hook<D> = { key: `${by.id}/${id}`, owner: by, listener };
     hooks.set(hook.key, hook);
     const remove = () => {
@@ -104,10 +106,11 @@ export const messages = {
     /** Put these in the plugin's `patches` */
     patches: [
         onDemand({
-            // The chat box's handleSendMessage checks the message, then reads its content (checked 2026-11-05):
+            // The chat box's handleSendMessage checks the message, then reads its content (checked 2026-11-26):
             //   return(0,nA.i)({…,channel:h}).then(e=>{let{valid:s,failureReason:A}=e;if(!s)if(…)…;else return{shouldClear:!1,shouldRefocus:!1};let f=(0,tD.S)(t,{channel:h,isEdit:!1});
-            // The listeners run between the two, so a changed content goes through Discord's own handling.
-            // Cancelling answers what an invalid message does: the text stays in the box.
+            // The listeners run between the two: a changed content still goes through Discord's handling.
+            // Cancelling keeps the text in the box, as an invalid message does, and returns shouldRefocus:!0
+            // to keep focus in the box: the user can fix the text and send again without clicking back.
             find: ".handleSendMessage,onResize:",
             replace: {
                 match: /\.then\((?:async )?(\i)=>\{(let\{valid:(\i),failureReason:\i\}=\1;if\(!\3\).{0,1000}?)(?=let \i=\(0,\i\.\i\)\((\i),\{channel:(\i),isEdit:!1\}\))/,
@@ -117,7 +120,7 @@ export const messages = {
             },
         }),
         onDemand({
-            // The message editor's onSubmit checks the edit, then reads its content (checked 2026-11-05):
+            // The message editor's onSubmit checks the edit, then reads its content (checked 2026-11-26):
             //   u({value:e,channel:n,message:t}).then(s=>{let{valid:u}=s;if(!u)return Promise.resolve({shouldClear:!1,shouldRefocus:!1});let d=(0,l.S)(e,{channel:n,isEdit:!0});
             find: "isEdit:!0",
             replace: {
@@ -134,10 +137,10 @@ export const messages = {
      * 5 seconds for each. The plugin's manifest must declare readMessages, or nothing.
      */
     beforeSend(mist: MistOwner, id: string, listener: Listener<SendDraft>): () => void {
-        return addHook(outgoing().send, entryOwner(mist, "messages.beforeSend", true), id, listener);
+        return addHook("messages.beforeSend", outgoing().send, mist, id, listener);
     },
     /** Runs `listener` before each edit the user saves, while the plugin runs. Held as beforeSend is. */
     beforeEdit(mist: MistOwner, id: string, listener: Listener<EditDraft>): () => void {
-        return addHook(outgoing().edit, entryOwner(mist, "messages.beforeEdit", true), id, listener);
+        return addHook("messages.beforeEdit", outgoing().edit, mist, id, listener);
     },
 };

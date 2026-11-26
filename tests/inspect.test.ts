@@ -36,9 +36,21 @@ const profile = mkdtempSync(join(tmpdir(), "mist-inspect-"));
 
 beforeAll(async () => {
     if (!browser) return;
-    chrome = spawn(browser, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--window-size=800,600", "about:blank"], { stdio: "ignore" });
+    const args = [
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "--no-first-run",
+        "--window-size=800,600",
+        ...(process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : []),
+        "about:blank",
+    ];
+    chrome = spawn(browser, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    chrome.stderr?.on("data", chunk => { stderr += String(chunk); });
     const portFile = join(profile, "DevToolsActivePort");
-    for (let i = 0; i < 200 && !existsSync(portFile); i++) await Bun.sleep(50);
+    for (let i = 0; i < 400 && !existsSync(portFile) && chrome.exitCode === null; i++) await Bun.sleep(50);
+    if (!existsSync(portFile)) throw new Error(`Chrome didn't write ${portFile} (exit ${chrome.exitCode}): ${stderr.slice(0, 500)}`);
     const port = readFileSync(portFile, "utf8").split("\n")[0];
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as { type: string; webSocketDebuggerUrl: string; }[];
     page = await open(targets.find(t => t.type === "page")!.webSocketDebuggerUrl);
@@ -49,9 +61,6 @@ beforeAll(async () => {
 async function stopChrome(browserProcess: ChildProcess, conn?: Connection, graceMs = 5000): Promise<void> {
     if (browserProcess.exitCode !== null || browserProcess.signalCode !== null) return;
     const exited = new Promise<void>(resolve => browserProcess.once("exit", () => resolve()));
-    // Ask Chrome to shut down its whole process tree (GPU, network, crashpad) so profile locks release
-    if (conn) await conn.send("Browser.close").catch(() => { });
-    else browserProcess.kill();
     const forceKill = () => {
         if (process.platform === "win32" && browserProcess.pid) {
             try { execFileSync("taskkill", ["/PID", String(browserProcess.pid), "/T", "/F"], { stdio: "ignore" }); } catch { }
@@ -61,6 +70,9 @@ async function stopChrome(browserProcess: ChildProcess, conn?: Connection, grace
     };
     const timer = setTimeout(forceKill, graceMs);
     try {
+        // Ask Chrome to shut down its whole process tree (GPU, network, crashpad) so profile locks release
+        if (conn) await Promise.race([conn.send("Browser.close").catch(() => { }), exited]);
+        else browserProcess.kill();
         await Promise.race([exited, Bun.sleep(graceMs * 2)]);
     } finally {
         clearTimeout(timer);

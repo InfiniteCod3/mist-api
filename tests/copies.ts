@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,10 +18,11 @@ export function copyOfSources(version: string, eviApi?: string) {
             writeFileSync(file, readFileSync(file, "utf8").replaceAll('from "@evi/api"', `from ${JSON.stringify(eviApi)}`));
         }
     }
-    // The preloaded Electron stand-in is found from tests/ only; a copy's imports just need to resolve
+    // The preloaded Electron stand-in and repo packages are found from the repo only; a copy's imports just need to resolve
     mkdirSync(join(dir, "node_modules", "electron"), { recursive: true });
     writeFileSync(join(dir, "node_modules", "electron", "package.json"), JSON.stringify({ type: "module", main: "index.js" }));
     writeFileSync(join(dir, "node_modules", "electron", "index.js"), "export const BrowserWindow = {}, dialog = {}, safeStorage = {}, app = { on() { }, removeListener() { } };");
+    symlinkSync(join(import.meta.dir, "..", "node_modules", "react"), join(dir, "node_modules", "react"), "junction");
     return { dir, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
